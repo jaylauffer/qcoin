@@ -102,6 +102,12 @@ dependencies = [
 [[package]]
 name = "qcoin-consensus"
 version = "0.1.0"
+dependencies = [
+ "qcoin-crypto",
+ "qcoin-ledger",
+ "qcoin-types",
+ "thiserror",
+]
 
 [[package]]
 name = "qcoin-crypto"
