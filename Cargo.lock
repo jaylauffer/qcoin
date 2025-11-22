@@ -116,6 +116,8 @@ dependencies = [
 name = "qcoin-ledger"
 version = "0.1.0"
 dependencies = [
+ "bincode",
+ "blake3",
  "qcoin-crypto",
  "qcoin-script",
  "qcoin-types",
