@@ -134,6 +134,12 @@ dependencies = [
 [[package]]
 name = "qcoin-node"
 version = "0.1.0"
+dependencies = [
+ "qcoin-consensus",
+ "qcoin-ledger",
+ "qcoin-script",
+ "qcoin-types",
+]
 
 [[package]]
 name = "qcoin-script"

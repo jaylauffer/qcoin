@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+qcoin-types = { path = "../qcoin-types" }
+qcoin-ledger = { path = "../qcoin-ledger" }
+qcoin-consensus = { path = "../qcoin-consensus" }
+qcoin-script = { path = "../qcoin-script" }
