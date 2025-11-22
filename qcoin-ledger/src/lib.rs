@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use qcoin_script::{Script, ScriptContext, ScriptEngine};
-use qcoin_types::{AssetAmount, Hash256, Output, Transaction};
+use qcoin_types::{AssetAmount, Block, Hash256, Output, Transaction};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -16,6 +16,13 @@ pub type UtxoSet = HashMap<UtxoKey, Output>;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LedgerState {
     pub utxos: UtxoSet,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ChainState {
+    pub ledger: LedgerState,
+    pub height: u64,
+    pub tip_hash: Hash256,
 }
 
 #[derive(Debug, Error)]
@@ -116,4 +123,25 @@ impl LedgerState {
 fn accumulate_asset(totals: &mut HashMap<Hash256, u128>, asset: &AssetAmount) {
     let entry = totals.entry(asset.asset_id.0).or_insert(0);
     *entry += asset.amount;
+}
+
+impl ChainState {
+    pub fn apply_block<E: ScriptEngine>(
+        &mut self,
+        block: &Block,
+        engine: &E,
+    ) -> Result<(), LedgerError> {
+        for tx in &block.transactions {
+            self.ledger
+                .apply_transaction(tx, engine, block.header.height)?;
+        }
+
+        self.height = block.header.height;
+        let serialized =
+            bincode::serialize(&block.header).expect("block header serialization should be infallible");
+        let hash = blake3::hash(&serialized);
+        self.tip_hash = *hash.as_bytes();
+
+        Ok(())
+    }
 }

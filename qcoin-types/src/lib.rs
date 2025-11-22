@@ -3,6 +3,21 @@ use serde::{Deserialize, Serialize};
 pub type Hash256 = [u8; 32];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockHeader {
+    pub parent_hash: Hash256,
+    pub state_root: Hash256,
+    pub tx_root: Hash256,
+    pub height: u64,
+    pub timestamp: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Block {
+    pub header: BlockHeader,
+    pub transactions: Vec<Transaction>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AssetKind {
     Fungible,
     NonFungible,
