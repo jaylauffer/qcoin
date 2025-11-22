@@ -145,3 +145,77 @@ impl ChainState {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qcoin_script::NoopScriptEngine;
+    use qcoin_types::{AssetId, TransactionInput, TransactionKind};
+
+    fn simple_asset_id() -> AssetId {
+        AssetId([1u8; 32])
+    }
+
+    fn simple_utxo() -> Output {
+        Output {
+            owner_script_hash: [0u8; 32],
+            assets: vec![AssetAmount {
+                asset_id: simple_asset_id(),
+                amount: 100,
+            }],
+            metadata_hash: None,
+        }
+    }
+
+    #[test]
+    fn test_missing_input_fails() {
+        let mut ledger = LedgerState::default();
+        let tx = Transaction {
+            kind: TransactionKind::Transfer,
+            inputs: vec![TransactionInput {
+                tx_id: [9u8; 32],
+                index: 0,
+            }],
+            outputs: vec![],
+            witness: vec![],
+        };
+
+        let engine = NoopScriptEngine::default();
+        let result = ledger.apply_transaction(&tx, &engine, 0);
+
+        assert!(matches!(result, Err(LedgerError::MissingInput)));
+    }
+
+    #[test]
+    fn test_asset_conservation_violated() {
+        let mut ledger = LedgerState::default();
+        let previous_tx_id = [7u8; 32];
+        let utxo_key = UtxoKey {
+            tx_id: previous_tx_id,
+            index: 0,
+        };
+        ledger.utxos.insert(utxo_key, simple_utxo());
+
+        let spending_tx = Transaction {
+            kind: TransactionKind::Transfer,
+            inputs: vec![TransactionInput {
+                tx_id: previous_tx_id,
+                index: 0,
+            }],
+            outputs: vec![Output {
+                owner_script_hash: [0u8; 32],
+                assets: vec![AssetAmount {
+                    asset_id: simple_asset_id(),
+                    amount: 200,
+                }],
+                metadata_hash: None,
+            }],
+            witness: vec![],
+        };
+
+        let engine = NoopScriptEngine::default();
+        let result = ledger.apply_transaction(&spending_tx, &engine, 0);
+
+        assert!(matches!(result, Err(LedgerError::AssetConservationViolation)));
+    }
+}
