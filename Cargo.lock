@@ -115,6 +115,13 @@ dependencies = [
 [[package]]
 name = "qcoin-ledger"
 version = "0.1.0"
+dependencies = [
+ "qcoin-crypto",
+ "qcoin-script",
+ "qcoin-types",
+ "serde",
+ "thiserror",
+]
 
 [[package]]
 name = "qcoin-node"
@@ -123,6 +130,12 @@ version = "0.1.0"
 [[package]]
 name = "qcoin-script"
 version = "0.1.0"
+dependencies = [
+ "qcoin-crypto",
+ "qcoin-types",
+ "serde",
+ "thiserror",
+]
 
 [[package]]
 name = "qcoin-types"
