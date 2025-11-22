@@ -5,3 +5,9 @@ edition = "2021"
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+thiserror = "1"
+qcoin-types = { path = "../qcoin-types" }
+qcoin-ledger = { path = "../qcoin-ledger" }
+qcoin-crypto = { path = "../qcoin-crypto" }
