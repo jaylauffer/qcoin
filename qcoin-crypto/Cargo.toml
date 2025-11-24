@@ -9,4 +9,6 @@ path = "src/lib.rs"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
-rand = "0.8"
+pqcrypto-dilithium = "0.5"
+pqcrypto-falcon = "0.4"
+pqcrypto-traits = "0.3"

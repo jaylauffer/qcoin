@@ -137,8 +137,8 @@ impl ChainState {
         }
 
         self.height = block.header.height;
-        let serialized =
-            bincode::serialize(&block.header).expect("block header serialization should be infallible");
+        let serialized = bincode::serialize(&block.header)
+            .expect("block header serialization should be infallible");
         let hash = blake3::hash(&serialized);
         self.tip_hash = *hash.as_bytes();
 
@@ -216,6 +216,9 @@ mod tests {
         let engine = NoopScriptEngine::default();
         let result = ledger.apply_transaction(&spending_tx, &engine, 0);
 
-        assert!(matches!(result, Err(LedgerError::AssetConservationViolation)));
+        assert!(matches!(
+            result,
+            Err(LedgerError::AssetConservationViolation)
+        ));
     }
 }

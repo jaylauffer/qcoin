@@ -1,5 +1,11 @@
-use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
+
+use pqcrypto_dilithium::dilithium2;
+use pqcrypto_falcon::falcon512;
+use pqcrypto_traits::sign::{
+    DetachedSignature, PublicKey as PqPublicKeyTrait, SecretKey as PqSecretKeyTrait,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignatureSchemeId {
@@ -8,19 +14,50 @@ pub enum SignatureSchemeId {
     Unknown(u16),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl SignatureSchemeId {
+    pub const DILITHIUM2_ID: u16 = 0x01;
+    pub const FALCON512_ID: u16 = 0x02;
+
+    pub fn from_u16(id: u16) -> Self {
+        match id {
+            Self::DILITHIUM2_ID => SignatureSchemeId::Dilithium2,
+            Self::FALCON512_ID => SignatureSchemeId::Falcon512,
+            other => SignatureSchemeId::Unknown(other),
+        }
+    }
+
+    pub fn to_u16(self) -> u16 {
+        match self {
+            SignatureSchemeId::Dilithium2 => Self::DILITHIUM2_ID,
+            SignatureSchemeId::Falcon512 => Self::FALCON512_ID,
+            SignatureSchemeId::Unknown(value) => value,
+        }
+    }
+}
+
+impl Display for SignatureSchemeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SignatureSchemeId::Dilithium2 => write!(f, "dilithium2"),
+            SignatureSchemeId::Falcon512 => write!(f, "falcon512"),
+            SignatureSchemeId::Unknown(value) => write!(f, "unknown-{}", value),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicKey {
     pub scheme: SignatureSchemeId,
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivateKey {
     pub scheme: SignatureSchemeId,
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Signature {
     pub scheme: SignatureSchemeId,
     pub bytes: Vec<u8>,
@@ -38,12 +75,14 @@ pub trait PqSchemeRegistry {
 }
 
 pub struct InMemoryRegistry {
-    schemes: Vec<Box<dyn PqSignatureScheme>>, 
+    schemes: Vec<Box<dyn PqSignatureScheme>>,
 }
 
 impl InMemoryRegistry {
     pub fn new() -> Self {
-        Self { schemes: Vec::new() }
+        Self {
+            schemes: Vec::new(),
+        }
     }
 
     pub fn with_scheme(mut self, scheme: Box<dyn PqSignatureScheme>) -> Self {
@@ -65,63 +104,147 @@ impl PqSchemeRegistry for InMemoryRegistry {
     }
 }
 
-#[derive(Debug)]
-pub struct TestScheme;
+pub struct Dilithium2Scheme;
 
-impl TestScheme {
-    fn hash_fnv1a64(data: &[u8]) -> u64 {
-        const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-        const FNV_PRIME: u64 = 0x100000001b3;
-
-        let mut hash = FNV_OFFSET;
-        for byte in data {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-        hash
-    }
-}
-
-impl PqSignatureScheme for TestScheme {
+impl PqSignatureScheme for Dilithium2Scheme {
     fn id(&self) -> SignatureSchemeId {
-        SignatureSchemeId::Unknown(0)
+        SignatureSchemeId::Dilithium2
     }
 
     fn keygen(&self) -> (PublicKey, PrivateKey) {
-        let mut bytes = vec![0u8; 32];
-        OsRng.fill_bytes(&mut bytes);
+        let (pk, sk) = dilithium2::keypair();
         (
             PublicKey {
                 scheme: self.id(),
-                bytes: bytes.clone(),
+                bytes: pk.as_bytes().to_vec(),
             },
             PrivateKey {
                 scheme: self.id(),
-                bytes,
+                bytes: sk.as_bytes().to_vec(),
             },
         )
     }
 
     fn sign(&self, sk: &PrivateKey, msg: &[u8]) -> Signature {
-        let mut data = Vec::with_capacity(sk.bytes.len() + msg.len());
-        data.extend_from_slice(&sk.bytes);
-        data.extend_from_slice(msg);
-        let hash = Self::hash_fnv1a64(&data);
+        let sk = match dilithium2::SecretKey::from_bytes(&sk.bytes) {
+            Ok(key) => key,
+            Err(_) => {
+                return Signature {
+                    scheme: self.id(),
+                    bytes: Vec::new(),
+                }
+            }
+        };
+
+        let signature = dilithium2::detached_sign(msg, &sk);
         Signature {
             scheme: self.id(),
-            bytes: hash.to_le_bytes().to_vec(),
+            bytes: signature.as_bytes().to_vec(),
         }
     }
 
     fn verify(&self, pk: &PublicKey, msg: &[u8], sig: &Signature) -> bool {
-        if sig.scheme != self.id() || pk.scheme != self.id() {
+        if pk.scheme != self.id() || sig.scheme != self.id() {
             return false;
         }
 
-        let mut data = Vec::with_capacity(pk.bytes.len() + msg.len());
-        data.extend_from_slice(&pk.bytes);
-        data.extend_from_slice(msg);
-        let expected = Self::hash_fnv1a64(&data).to_le_bytes();
-        sig.bytes.as_slice() == expected
+        let pk = match dilithium2::PublicKey::from_bytes(&pk.bytes) {
+            Ok(key) => key,
+            Err(_) => return false,
+        };
+        let sig = match DetachedSignature::from_bytes(&sig.bytes) {
+            Ok(sig) => sig,
+            Err(_) => return false,
+        };
+
+        dilithium2::verify_detached_signature(&sig, msg, &pk).is_ok()
+    }
+}
+
+pub struct Falcon512Scheme;
+
+impl PqSignatureScheme for Falcon512Scheme {
+    fn id(&self) -> SignatureSchemeId {
+        SignatureSchemeId::Falcon512
+    }
+
+    fn keygen(&self) -> (PublicKey, PrivateKey) {
+        let (pk, sk) = falcon512::keypair();
+        (
+            PublicKey {
+                scheme: self.id(),
+                bytes: pk.as_bytes().to_vec(),
+            },
+            PrivateKey {
+                scheme: self.id(),
+                bytes: sk.as_bytes().to_vec(),
+            },
+        )
+    }
+
+    fn sign(&self, sk: &PrivateKey, msg: &[u8]) -> Signature {
+        let sk = match falcon512::SecretKey::from_bytes(&sk.bytes) {
+            Ok(key) => key,
+            Err(_) => {
+                return Signature {
+                    scheme: self.id(),
+                    bytes: Vec::new(),
+                }
+            }
+        };
+
+        let signature = falcon512::detached_sign(msg, &sk);
+        Signature {
+            scheme: self.id(),
+            bytes: signature.as_bytes().to_vec(),
+        }
+    }
+
+    fn verify(&self, pk: &PublicKey, msg: &[u8], sig: &Signature) -> bool {
+        if pk.scheme != self.id() || sig.scheme != self.id() {
+            return false;
+        }
+
+        let pk = match falcon512::PublicKey::from_bytes(&pk.bytes) {
+            Ok(key) => key,
+            Err(_) => return false,
+        };
+        let sig = match DetachedSignature::from_bytes(&sig.bytes) {
+            Ok(sig) => sig,
+            Err(_) => return false,
+        };
+
+        falcon512::verify_detached_signature(&sig, msg, &pk).is_ok()
+    }
+}
+
+pub fn default_registry() -> InMemoryRegistry {
+    InMemoryRegistry::new()
+        .with_scheme(Box::new(Dilithium2Scheme))
+        .with_scheme(Box::new(Falcon512Scheme))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MESSAGE: &[u8] = b"qcoin-pq-test";
+
+    #[test]
+    fn dilithium_roundtrip() {
+        let scheme = Dilithium2Scheme;
+        let (pk, sk) = scheme.keygen();
+        let sig = scheme.sign(&sk, MESSAGE);
+
+        assert!(scheme.verify(&pk, MESSAGE, &sig));
+    }
+
+    #[test]
+    fn falcon_roundtrip() {
+        let scheme = Falcon512Scheme;
+        let (pk, sk) = scheme.keygen();
+        let sig = scheme.sign(&sk, MESSAGE);
+
+        assert!(scheme.verify(&pk, MESSAGE, &sig));
     }
 }
