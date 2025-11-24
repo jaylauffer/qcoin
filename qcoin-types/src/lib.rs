@@ -1,3 +1,4 @@
+use qcoin_crypto::{PublicKey, Signature};
 use serde::{Deserialize, Serialize};
 
 pub type Hash256 = [u8; 32];
@@ -15,6 +16,8 @@ pub struct BlockHeader {
 pub struct Block {
     pub header: BlockHeader,
     pub transactions: Vec<Transaction>,
+    pub proposer_public_key: PublicKey,
+    pub signature: Signature,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

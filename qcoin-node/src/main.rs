@@ -1,6 +1,6 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use qcoin_consensus::{ConsensusEngine, DummyConsensusEngine};
-use qcoin_crypto::{PqSignatureScheme, SignatureSchemeId, TestScheme};
+use qcoin_crypto::{default_registry, PqSchemeRegistry, SignatureSchemeId};
 use qcoin_ledger::{ChainState, LedgerState};
 use qcoin_script::NoopScriptEngine;
 use qcoin_types::Transaction;
@@ -18,7 +18,25 @@ enum Commands {
     /// Run the node with the dummy consensus engine
     Run,
     /// Generate a new PQ keypair using the dummy scheme
-    Keygen,
+    Keygen {
+        #[arg(long, value_enum, default_value_t = SchemeArg::Dilithium2)]
+        scheme: SchemeArg,
+    },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum SchemeArg {
+    Dilithium2,
+    Falcon512,
+}
+
+impl From<SchemeArg> for SignatureSchemeId {
+    fn from(value: SchemeArg) -> Self {
+        match value {
+            SchemeArg::Dilithium2 => SignatureSchemeId::Dilithium2,
+            SchemeArg::Falcon512 => SignatureSchemeId::Falcon512,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -33,7 +51,7 @@ fn main() {
 
     match cli.command {
         Commands::Run => run_node(),
-        Commands::Keygen => generate_keypair(),
+        Commands::Keygen { scheme } => generate_keypair(scheme),
     }
 }
 
@@ -49,7 +67,7 @@ fn run_node() {
         tip_hash: [0u8; 32],
     };
 
-    let consensus = DummyConsensusEngine;
+    let consensus = DummyConsensusEngine::default();
     let txs: Vec<Transaction> = Vec::new();
     let block = consensus
         .propose_block(&chain, txs)
@@ -67,9 +85,15 @@ fn run_node() {
     println!("New tip_hash: {:?}", chain.tip_hash);
 }
 
-fn generate_keypair() {
-    let scheme = TestScheme;
-    let (pk, sk) = scheme.keygen();
+fn generate_keypair(scheme: SchemeArg) {
+    let scheme_id: SignatureSchemeId = scheme.into();
+    let (pk, sk) = {
+        let registry = default_registry();
+        let selected_scheme = registry
+            .get(&scheme_id)
+            .expect("selected scheme must exist in registry");
+        selected_scheme.keygen()
+    };
 
     let output = KeypairOutput {
         scheme: scheme_name(pk.scheme),
@@ -82,11 +106,7 @@ fn generate_keypair() {
 }
 
 fn scheme_name(id: SignatureSchemeId) -> String {
-    match id {
-        SignatureSchemeId::Dilithium2 => "dilithium2".to_string(),
-        SignatureSchemeId::Falcon512 => "falcon512".to_string(),
-        SignatureSchemeId::Unknown(value) => format!("unknown-{}", value),
-    }
+    id.to_string()
 }
 
 fn to_hex(bytes: &[u8]) -> String {
