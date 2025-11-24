@@ -2,6 +2,8 @@
 
 QCoin is a post-quantum-secure reserve asset and native multi-asset platform focused on game tokens and digital items. Learn more in the original design discussion: https://chatgpt.com/share/69214c32-7a8c-800e-a153-0669d7fc3101.
 
+Follow-up: https://chatgpt.com/share/69248807-3d10-800e-a3d9-22ad6e7aa8a5
+
 ## Crate layout
 
 - **qcoin-crypto** – Post-quantum signature abstractions.
