@@ -12,3 +12,4 @@ qcoin-types = { path = "../qcoin-types" }
 qcoin-ledger = { path = "../qcoin-ledger" }
 qcoin-crypto = { path = "../qcoin-crypto" }
 bincode = "1"
+blake3 = "1"

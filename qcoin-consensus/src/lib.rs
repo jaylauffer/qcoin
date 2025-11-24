@@ -1,3 +1,4 @@
+use blake3::Hasher;
 use qcoin_crypto::{
     default_registry, InMemoryRegistry, PqSchemeRegistry, PqSignatureScheme, PrivateKey, PublicKey,
     SignatureSchemeId,
@@ -68,16 +69,29 @@ impl DummyConsensusEngine {
     }
 }
 
+fn compute_tx_root(txs: &[Transaction]) -> Hash256 {
+    let mut hasher = Hasher::new();
+
+    for tx in txs {
+        let tx_id = tx.tx_id();
+        hasher.update(&tx_id);
+    }
+
+    *hasher.finalize().as_bytes()
+}
+
 impl ConsensusEngine for DummyConsensusEngine {
     fn propose_block(
         &self,
         chain: &ChainState,
         txs: Vec<Transaction>,
     ) -> Result<Block, ConsensusError> {
+        let tx_root = compute_tx_root(&txs);
+
         let header = qcoin_types::BlockHeader {
             parent_hash: chain.tip_hash,
             state_root: Hash256::default(),
-            tx_root: Hash256::default(),
+            tx_root,
             height: chain.height + 1,
             timestamp: 0,
         };
@@ -107,6 +121,11 @@ impl ConsensusEngine for DummyConsensusEngine {
             return Err(ConsensusError::InvalidBlock);
         }
 
+        let expected_tx_root = compute_tx_root(&block.transactions);
+        if block.header.tx_root != expected_tx_root {
+            return Err(ConsensusError::InvalidBlock);
+        }
+
         let header_bytes = bincode::serialize(&block.header)
             .map_err(|err| ConsensusError::Other(format!("failed to serialize header: {err}")))?;
 
@@ -119,5 +138,37 @@ impl ConsensusEngine for DummyConsensusEngine {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qcoin_types::TransactionKind;
+
+    #[test]
+    fn validate_block_rejects_mutated_transactions() {
+        let engine = DummyConsensusEngine::default();
+        let chain = ChainState::default();
+
+        let tx = Transaction {
+            kind: TransactionKind::Transfer,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            witness: Vec::new(),
+        };
+
+        let mut block = engine
+            .propose_block(&chain, vec![tx.clone()])
+            .expect("block should be proposed");
+
+        engine
+            .validate_block(&chain, &block)
+            .expect("freshly built block should validate");
+
+        block.transactions.push(tx);
+
+        let result = engine.validate_block(&chain, &block);
+        assert!(matches!(result, Err(ConsensusError::InvalidBlock)));
     }
 }

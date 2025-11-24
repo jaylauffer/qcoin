@@ -290,6 +290,7 @@ name = "qcoin-consensus"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "blake3",
  "qcoin-crypto",
  "qcoin-ledger",
  "qcoin-types",
