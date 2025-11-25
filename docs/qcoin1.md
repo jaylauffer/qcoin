@@ -6,37 +6,38 @@ Here’s the straight, engineering-level answer on how Bitcoin has evolved and w
  
 # 1. How Bitcoin Has Evolved (Technical + Architectural)
 Bitcoin’s core protocol has stayed conservative, and upgrades are slow, deliberate, and security-focused. The major evolutions:
-(A) SegWit (2017)
--	Fixed transaction malleability
--	Increased block capacity by changing how signatures are stored
--	Enabled Lightning and other L2 protocols
-(B) Taproot (2021)
--	Introduced Schnorr signatures
--	Enabled more complex spending conditions in a privacy-preserving way
--	Opened the door for “Tapscript” → more flexible scripting
-(C) Lightning Network (L2 for payments)
--	Off-chain bi-directional payment channels
--	Designed for high-volume micropayments
--	Not a general-purpose execution environment
-(D) Ordinals + Inscriptions (2023–2024)
--	Discovered client-side protocol leveraging Taproot to “inscribe” data into witness fields
--	Functionally created NFTs on Bitcoin
--	Extremely controversial because it fills blockspace with arbitrary data
-(E) BRC-20 (2023)
--	A pseudo-token standard implemented entirely as a client-side parser of JSON blobs inside inscriptions
--	Not native to the Bitcoin protocol
--	No smart contracts
--	Indexers define reality, not the chain itself
-(F) Runestones / Runes (2024, Casey Rodarmor)
--	A more compact token protocol than BRC-20
--	Uses UTXOs instead of arbitrary JSON blobs
--	Designed to reduce junk/spam and promote more deterministic token accounting
--	Still not “native,” still indexer dependent, but more UTXO-aligned
-(G) Lightning + RGB + Taro
-A family of “smart contracts over client-side validation” built over Bitcoin + Lightning:
--	RGB (LNP/BP): Smart contracts using client-side validation + Bitcoin commitments
--	Taro (Lightning Labs): Issued assets that route over Lightning
--	Storm / Prometheus / AluVM: New virtual machine proposals not adopted widely yet
+- (A) SegWit (2017)
+    -	Fixed transaction malleability
+    -	Increased block capacity by changing how signatures are stored
+    -	Enabled Lightning and other L2 protocols
+- (B) Taproot (2021)
+    -	Introduced Schnorr signatures
+    -	Enabled more complex spending conditions in a privacy-preserving way
+    -	Opened the door for “Tapscript” → more flexible scripting
+- (C) Lightning Network (L2 for payments)
+    -	Off-chain bi-directional payment channels
+    -	Designed for high-volume micropayments
+    -	Not a general-purpose execution environment
+- (D) Ordinals + Inscriptions (2023–2024)
+    -	Discovered client-side protocol leveraging Taproot to “inscribe” data into witness fields
+    -	Functionally created NFTs on Bitcoin
+    -	Extremely controversial because it fills blockspace with arbitrary data
+- (E) BRC-20 (2023)
+    -	A pseudo-token standard implemented entirely as a client-side parser of JSON blobs inside inscriptions
+    -	Not native to the Bitcoin protocol
+    -	No smart contracts
+    -	Indexers define reality, not the chain itself
+- (F) Runestones / Runes (2024, Casey Rodarmor)
+    -	A more compact token protocol than BRC-20
+    -	Uses UTXOs instead of arbitrary JSON blobs
+    -	Designed to reduce junk/spam and promote more deterministic token accounting
+    -	Still not “native,” still indexer dependent, but more UTXO-aligned
+- (G) Lightning + RGB + Taro
+    - A family of “smart contracts over client-side validation” built over Bitcoin + Lightning:
+    -	RGB (LNP/BP): Smart contracts using client-side validation + Bitcoin commitments
+    -	Taro (Lightning Labs): Issued assets that route over Lightning
+    -	Storm / Prometheus / AluVM: New virtual machine proposals not adopted widely yet
+  
 These try to bring a more Ethereum-like asset system without modifying base-layer Bitcoin.
  
 # 2. If You Want to Create Tokens on Bitcoin (2025 State of the World)
