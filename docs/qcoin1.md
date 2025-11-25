@@ -1,11 +1,10 @@
 https://github.com/jaylauffer/qcoin
 
-You asked:
-How has bitcoin evolved, what if I want to create tokens on the bitcoin blockchain?
-ChatGPT said:
+*How has bitcoin evolved, what if I want to create tokens on the bitcoin blockchain?*
+
 Here’s the straight, engineering-level answer on how Bitcoin has evolved and what it means if you want to create tokens on Bitcoin today. No fluff.
  
-1. How Bitcoin Has Evolved (Technical + Architectural)
+# 1. How Bitcoin Has Evolved (Technical + Architectural)
 Bitcoin’s core protocol has stayed conservative, and upgrades are slow, deliberate, and security-focused. The major evolutions:
 (A) SegWit (2017)
 -	Fixed transaction malleability
@@ -40,7 +39,7 @@ A family of “smart contracts over client-side validation” built over Bitcoin
 -	Storm / Prometheus / AluVM: New virtual machine proposals not adopted widely yet
 These try to bring a more Ethereum-like asset system without modifying base-layer Bitcoin.
  
-2. If You Want to Create Tokens on Bitcoin (2025 State of the World)
+# 2. If You Want to Create Tokens on Bitcoin (2025 State of the World)
 There are five realistic approaches, and each has a different tradeoff surface:
  
 Option 1 — BRC-20 (the “dumb but popular” method)
@@ -120,7 +119,7 @@ Cons:
 Summary:
 If you want full programmability, use an L2 like Stacks or an EVM sidechain such as RSK/Merlin.
  
-3. Which Should You Use?
+# 3. Which Should You Use?
 If your goal is:
 A. Fast-to-market token → Runes
 Cleanest, simplest, most “Bitcoin-aligned.”
@@ -131,7 +130,7 @@ Most advanced.
 D. You want Ethereum-like functionality → Stacks / Botanix / RSK
 These give you full smart-contract VMs anchored to Bitcoin.
  
-4. Summary Table
+# 4. Summary Table
 Goal	Best Option	Why
 Easy fungible token	Runes	UTXO-based, modern, low overhead
 NFT-like objects	Ordinals / Inscriptions	Native, huge marketplace
@@ -139,21 +138,12 @@ Meme token	BRC-20	Liquidity + simplicity
 Real smart contracts	RGB or a Bitcoin L2 VM	Scalable and powerful
 Lightning-distributed token	Taro / RGB	Layer-2 routing
  
-5. If you want, I can:
--	Walk you through deploying a token using any of these approaches (Runes, BRC-20, RGB)
--	Give you sample minting transactions
--	Help design the tokenomics
--	Build a Rust/Python script to generate the necessary inscriptions
--	Or explain how to build your own Bitcoin Layer-2 token system with a UTXO commitment scheme
-Just tell me which direction you want:
-Runes, BRC-20, RGB, or full Bitcoin L2 with a VM?
-You said:
-what if I want something post quantum safe?
-ChatGPT said:
+*I want something post quantum safe?*
+
 If you want post-quantum-safe tokens on Bitcoin, there are only a few viable technical paths — and most “token protocols” on BTC are not quantum-resistant today because they rely on ECDSA or Schnorr keys.
 Here is the real situation (2025), without sugar-coating it.
  
-1. The Bitcoin Base Layer Is Not Post-Quantum Safe (Yet)
+# 1. The Bitcoin Base Layer Is Not Post-Quantum Safe (Yet)
 Bitcoin fundamentally relies on:
 -	secp256k1 ECDSA (legacy)
 -	Schnorr signatures / Taproot
@@ -163,7 +153,7 @@ This means:
 If you issue a token whose control ultimately depends on controlling a Bitcoin key, the token is not post-quantum secure, regardless of Runes, BRC-20, RGB, Taro, or Ordinals.
 Everything inherits Bitcoin’s key model.
  
-2. What Types of Quantum Attacks Matter?
+# 2. What Types of Quantum Attacks Matter?
 (A) Preimage / address break
 Quantum adversary can derive your private key from your Bitcoin public key.
 → Any UTXO that has ever exposed a public key (almost all of them) becomes stealable.
@@ -174,7 +164,7 @@ Bottom line:
 Bitcoin L1 cannot be made PQ safe without a soft fork introducing PQ signature schemes.
 This is being discussed under “Bitcoin PQ migration proposals,” but it is not implemented.
  
-3. If You Want Tokens That ARE PQ-Safe Anyway
+# 3. If You Want Tokens That ARE PQ-Safe Anyway
 There are only three realistic engineering paths:
  
 Option 1 — Use a Bitcoin-anchored client-side protocol (RGB / Taproot Assets) with PQ cryptography
@@ -230,7 +220,7 @@ Downsides:
 -	Requires custom wallets
 -	Bitcoin miners and validators don’t verify PQ cryptography (only your script logic does)
  
-4. What NOT to Use if You Want PQ-Safe Tokens
+# 4. What NOT to Use if You Want PQ-Safe Tokens
 These are not PQ-safe:
 ❌ Runes
 Uses UTXO ownership via Bitcoin keys → not PQ-safe.
@@ -245,7 +235,7 @@ Still controlled by Bitcoin signatures.
 ❌ Lightning-based assets (Taro/RGB Lightning mode)
 Lightning channels rely on base-layer Bitcoin keys → not PQ-safe unless redesigned.
  
-5. So What Should You Do If You Want a PQ-Safe Token?
+# 5. So What Should You Do If You Want a PQ-Safe Token?
 Your requirements suggest:
 ✔ You want token issuance
 ✔ You want Bitcoin anchoring
@@ -262,7 +252,7 @@ Why?
 -	Extremely scalable
 -	Flexible VM (you’re a Rust engineer → easy to extend)
  
-6. If you want, I can design this with you
+# 6. If you want, I can design this with you
 I can give you:
 (A) Architecture blueprint
 -	PQ signature scheme
