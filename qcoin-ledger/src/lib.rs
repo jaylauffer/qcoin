@@ -149,8 +149,9 @@ impl ChainState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qcoin_crypto::{PublicKey, Signature, SignatureSchemeId};
     use qcoin_script::NoopScriptEngine;
-    use qcoin_types::{AssetId, TransactionInput, TransactionKind};
+    use qcoin_types::{AssetId, Block, BlockHeader, TransactionInput, TransactionKind};
 
     fn simple_asset_id() -> AssetId {
         AssetId([1u8; 32])
@@ -220,5 +221,96 @@ mod tests {
             result,
             Err(LedgerError::AssetConservationViolation)
         ));
+    }
+
+    #[test]
+    fn test_double_spend_rejected_within_transaction() {
+        let mut ledger = LedgerState::default();
+        let previous_tx_id = [5u8; 32];
+        let utxo_key = UtxoKey {
+            tx_id: previous_tx_id,
+            index: 0,
+        };
+        ledger.utxos.insert(utxo_key.clone(), simple_utxo());
+
+        let tx = Transaction {
+            kind: TransactionKind::Transfer,
+            inputs: vec![
+                TransactionInput {
+                    tx_id: previous_tx_id,
+                    index: 0,
+                },
+                TransactionInput {
+                    tx_id: previous_tx_id,
+                    index: 0,
+                },
+            ],
+            outputs: vec![simple_utxo()],
+            witness: vec![],
+        };
+
+        let engine = NoopScriptEngine::default();
+        let result = ledger.apply_transaction(&tx, &engine, 0);
+
+        assert!(matches!(result, Err(LedgerError::DoubleSpend)));
+        assert!(ledger.utxos.contains_key(&utxo_key));
+    }
+
+    #[test]
+    fn chain_state_apply_block_updates_height_and_tip_hash() {
+        let mut chain = ChainState::default();
+        let previous_tx_id = [11u8; 32];
+        let utxo_key = UtxoKey {
+            tx_id: previous_tx_id,
+            index: 0,
+        };
+        chain.ledger.utxos.insert(utxo_key.clone(), simple_utxo());
+
+        let spend_tx = Transaction {
+            kind: TransactionKind::Transfer,
+            inputs: vec![TransactionInput {
+                tx_id: previous_tx_id,
+                index: 0,
+            }],
+            outputs: vec![simple_utxo()],
+            witness: vec![],
+        };
+
+        let tx_id = spend_tx.tx_id();
+        let tx_root = spend_tx.tx_id();
+        let block = Block {
+            header: BlockHeader {
+                parent_hash: chain.tip_hash,
+                state_root: Hash256::default(),
+                tx_root,
+                height: 1,
+                timestamp: 42,
+            },
+            transactions: vec![spend_tx.clone()],
+            proposer_public_key: PublicKey {
+                scheme: SignatureSchemeId::Dilithium2,
+                bytes: Vec::new(),
+            },
+            signature: Signature {
+                scheme: SignatureSchemeId::Dilithium2,
+                bytes: Vec::new(),
+            },
+        };
+
+        let expected_tip_hash = {
+            let serialized = bincode::serialize(&block.header).unwrap();
+            *blake3::hash(&serialized).as_bytes()
+        };
+
+        let engine = NoopScriptEngine::default();
+        chain
+            .apply_block(&block, &engine)
+            .expect("block application should succeed");
+
+        assert_eq!(chain.height, 1);
+        assert_eq!(chain.tip_hash, expected_tip_hash);
+        assert!(!chain.ledger.utxos.contains_key(&utxo_key));
+        let new_utxo = UtxoKey { tx_id, index: 0 };
+        assert!(chain.ledger.utxos.contains_key(&new_utxo));
     }
 }

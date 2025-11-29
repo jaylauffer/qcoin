@@ -171,4 +171,46 @@ mod tests {
         let result = engine.validate_block(&chain, &block);
         assert!(matches!(result, Err(ConsensusError::InvalidBlock)));
     }
+
+    #[test]
+    fn validate_block_rejects_wrong_parent_hash() {
+        let engine = DummyConsensusEngine::default();
+        let chain = ChainState::default();
+
+        let block = engine
+            .propose_block(&chain, Vec::new())
+            .expect("block should build");
+
+        let mut forked_chain = chain.clone();
+        forked_chain.tip_hash = [7u8; 32];
+
+        let result = engine.validate_block(&forked_chain, &block);
+        assert!(matches!(result, Err(ConsensusError::InvalidBlock)));
+    }
+
+    #[test]
+    fn validate_block_rejects_bad_signature() {
+        let engine = DummyConsensusEngine::default();
+        let chain = ChainState::default();
+
+        let tx = Transaction {
+            kind: TransactionKind::Transfer,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            witness: Vec::new(),
+        };
+
+        let mut block = engine
+            .propose_block(&chain, vec![tx])
+            .expect("block should build");
+
+        if let Some(byte) = block.signature.bytes.first_mut() {
+            *byte ^= 0xFF;
+        } else {
+            block.signature.bytes.push(1);
+        }
+
+        let result = engine.validate_block(&chain, &block);
+        assert!(matches!(result, Err(ConsensusError::SignatureError)));
+    }
 }

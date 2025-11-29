@@ -114,3 +114,69 @@ pub fn create_asset_transaction(
 
     (definition, transaction)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_transaction() -> Transaction {
+        Transaction {
+            kind: TransactionKind::Transfer,
+            inputs: vec![],
+            outputs: vec![Output {
+                owner_script_hash: [0u8; 32],
+                assets: vec![AssetAmount {
+                    asset_id: AssetId([2u8; 32]),
+                    amount: 10,
+                }],
+                metadata_hash: None,
+            }],
+            witness: vec![],
+        }
+    }
+
+    #[test]
+    fn transaction_id_changes_when_payload_changes() {
+        let mut tx = base_transaction();
+        let original_id = tx.tx_id();
+
+        tx.outputs.push(Output {
+            owner_script_hash: [1u8; 32],
+            assets: vec![AssetAmount {
+                asset_id: AssetId([3u8; 32]),
+                amount: 1,
+            }],
+            metadata_hash: None,
+        });
+
+        let mutated_id = tx.tx_id();
+        assert_ne!(original_id, mutated_id);
+    }
+
+    #[test]
+    fn create_asset_transaction_derives_expected_asset_id() {
+        let issuer_script_hash = [4u8; 32];
+        let metadata_root = [9u8; 32];
+        let (definition, transaction) = create_asset_transaction(
+            issuer_script_hash,
+            AssetKind::SemiFungible,
+            metadata_root,
+        );
+
+        assert_eq!(transaction.kind, TransactionKind::CreateAsset);
+        assert!(transaction.inputs.is_empty());
+        assert!(transaction.outputs.is_empty());
+
+        let expected_kind_byte = 2u8;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&issuer_script_hash);
+        hasher.update(&[expected_kind_byte]);
+        hasher.update(&metadata_root);
+        let expected_asset_id = AssetId(*hasher.finalize().as_bytes());
+
+        assert_eq!(definition.asset_id, expected_asset_id);
+        assert_eq!(definition.kind, AssetKind::SemiFungible);
+        assert_eq!(definition.issuer_script_hash, issuer_script_hash);
+        assert_eq!(definition.metadata_root, metadata_root);
+    }
+}
