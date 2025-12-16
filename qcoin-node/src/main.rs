@@ -61,10 +61,13 @@ fn run_node() {
     let ledger = LedgerState {
         utxos: Default::default(),
     };
+    let state_root = ledger.state_root();
     let mut chain = ChainState {
         ledger,
         height: 0,
         tip_hash: [0u8; 32],
+        state_root,
+        last_timestamp: 0,
     };
 
     let consensus = DummyConsensusEngine::default();

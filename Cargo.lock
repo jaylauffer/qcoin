@@ -293,6 +293,7 @@ dependencies = [
  "blake3",
  "qcoin-crypto",
  "qcoin-ledger",
+ "qcoin-script",
  "qcoin-types",
  "thiserror",
 ]
