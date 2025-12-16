@@ -95,7 +95,9 @@ fn generate_keypair(scheme: SchemeArg) {
         let selected_scheme = registry
             .get(&scheme_id)
             .expect("selected scheme must exist in registry");
-        selected_scheme.keygen()
+        selected_scheme
+            .keygen()
+            .expect("key generation should succeed for selected scheme")
     };
 
     let output = KeypairOutput {
