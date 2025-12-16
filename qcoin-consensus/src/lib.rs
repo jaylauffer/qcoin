@@ -6,7 +6,7 @@ use qcoin_crypto::{
     SignatureSchemeId,
 };
 use qcoin_ledger::ChainState;
-use qcoin_script::NoopScriptEngine;
+use qcoin_script::DeterministicScriptEngine;
 use qcoin_types::{Block, Hash256, Transaction};
 use thiserror::Error;
 
@@ -121,7 +121,7 @@ fn compute_state_root(
     height: u64,
 ) -> Result<Hash256, ConsensusError> {
     let mut ledger = chain.ledger.clone();
-    let script_engine = NoopScriptEngine::default();
+    let script_engine = DeterministicScriptEngine::default();
 
     for tx in txs {
         ledger

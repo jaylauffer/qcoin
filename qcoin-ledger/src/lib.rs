@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use qcoin_script::{Script, ScriptContext, ScriptEngine};
+use qcoin_script::{ResolvedInput, Script, ScriptContext, ScriptEngine, ScriptHost};
 use qcoin_types::{AssetAmount, AssetId, Block, Hash256, Output, Transaction};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -11,7 +11,13 @@ pub struct UtxoKey {
     pub index: u32,
 }
 
-pub type UtxoSet = HashMap<UtxoKey, Output>;
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackedOutput {
+    pub output: Output,
+    pub created_height: u64,
+}
+
+pub type UtxoSet = HashMap<UtxoKey, TrackedOutput>;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LedgerState {
@@ -59,6 +65,38 @@ fn hash_bytes(data: &[u8]) -> Hash256 {
     *blake3::hash(data).as_bytes()
 }
 
+struct LedgerScriptHost<'a> {
+    utxos: &'a UtxoSet,
+    current_height: u64,
+}
+
+impl<'a> LedgerScriptHost<'a> {
+    fn new(utxos: &'a UtxoSet, current_height: u64) -> Self {
+        Self {
+            utxos,
+            current_height,
+        }
+    }
+}
+
+impl ScriptHost for LedgerScriptHost<'_> {
+    fn current_height(&self) -> Option<u64> {
+        Some(self.current_height)
+    }
+
+    fn input_utxo(&self, input: &qcoin_types::TransactionInput) -> Option<ResolvedInput> {
+        let key = UtxoKey {
+            tx_id: input.tx_id,
+            index: input.index,
+        };
+
+        self.utxos.get(&key).map(|tracked| ResolvedInput {
+            output: tracked.output.clone(),
+            created_height: Some(tracked.created_height),
+        })
+    }
+}
+
 impl LedgerState {
     pub fn state_root(&self) -> Hash256 {
         let mut entries: Vec<_> = self.utxos.iter().collect();
@@ -85,6 +123,7 @@ impl LedgerState {
         let mut consumed_utxos = Vec::new();
         let mut input_totals: HashMap<Hash256, u128> = HashMap::new();
         let mut output_totals: HashMap<Hash256, u128> = HashMap::new();
+        let host = LedgerScriptHost::new(&self.utxos, current_height);
 
         for (input_index, input) in tx.inputs.iter().enumerate() {
             let key = UtxoKey {
@@ -120,12 +159,12 @@ impl LedgerState {
                 bincode::serialize(&witness.script).map_err(|_| LedgerError::InvalidWitness)?;
             let script_hash = hash_bytes(&script_bytes);
 
-            if script_hash != referenced_output.owner_script_hash {
+            if script_hash != referenced_output.output.owner_script_hash {
                 return Err(LedgerError::ScriptHashMismatch);
             }
 
             match (
-                referenced_output.metadata_hash.as_ref(),
+                referenced_output.output.metadata_hash.as_ref(),
                 witness.metadata.as_ref(),
             ) {
                 (Some(expected), Some(bytes)) if *expected == hash_bytes(bytes) => {}
@@ -134,11 +173,11 @@ impl LedgerState {
             }
 
             engine
-                .eval(&witness.script, &ctx)
+                .eval(&witness.script, &ctx, &host)
                 .map_err(|_| LedgerError::ScriptFailed)?;
 
             consumed_utxos.push(key);
-            for asset in referenced_output.assets {
+            for asset in referenced_output.output.assets {
                 accumulate_asset(&mut input_totals, &asset);
             }
         }
@@ -181,7 +220,13 @@ impl LedgerState {
                 tx_id,
                 index: index as u32,
             };
-            self.utxos.insert(key, output);
+            self.utxos.insert(
+                key,
+                TrackedOutput {
+                    output,
+                    created_height: current_height,
+                },
+            );
         }
 
         Ok(())
@@ -220,7 +265,7 @@ impl ChainState {
 mod tests {
     use super::*;
     use qcoin_crypto::{PublicKey, Signature, SignatureSchemeId};
-    use qcoin_script::{NoopScriptEngine, OpCode, Script};
+    use qcoin_script::{DeterministicScriptEngine, OpCode, Script};
     use qcoin_types::{
         create_asset_transaction, AssetId, AssetKind, Block, BlockHeader, TransactionInput,
         TransactionKind,
@@ -246,8 +291,19 @@ mod tests {
         AssetId([1u8; 32])
     }
 
-    fn simple_utxo() -> Output {
+    fn simple_output() -> Output {
         utxo_with_metadata(None)
+    }
+
+    fn tracked(output: Output) -> TrackedOutput {
+        TrackedOutput {
+            output,
+            created_height: 0,
+        }
+    }
+
+    fn simple_utxo() -> TrackedOutput {
+        tracked(simple_output())
     }
 
     fn utxo_with_metadata(metadata: Option<Vec<u8>>) -> Output {
@@ -278,7 +334,7 @@ mod tests {
             destination_script_hash,
         );
 
-        let engine = NoopScriptEngine::default();
+        let engine = DeterministicScriptEngine::default();
         ledger
             .apply_transaction(&create_tx, &engine, 0)
             .expect("asset creation should succeed");
@@ -291,9 +347,12 @@ mod tests {
             .utxos
             .get(&minted_utxo_key)
             .expect("minted output should be recorded");
-        assert_eq!(minted_output.owner_script_hash, destination_script_hash);
-        assert_eq!(minted_output.assets.len(), 1);
-        let minted_asset = &minted_output.assets[0];
+        assert_eq!(
+            minted_output.output.owner_script_hash,
+            destination_script_hash
+        );
+        assert_eq!(minted_output.output.assets.len(), 1);
+        let minted_asset = &minted_output.output.assets[0];
         assert_eq!(minted_asset.asset_id, definition.asset_id);
         assert_eq!(minted_asset.amount, initial_supply);
 
@@ -305,7 +364,7 @@ mod tests {
             }],
             outputs: vec![Output {
                 owner_script_hash: destination_script_hash,
-                assets: minted_output.assets.clone(),
+                assets: minted_output.output.assets.clone(),
                 metadata_hash: None,
             }],
             witness: vec![build_witness(&asset_script, None)],
@@ -336,7 +395,7 @@ mod tests {
             witness: vec![],
         };
 
-        let engine = NoopScriptEngine::default();
+        let engine = DeterministicScriptEngine::default();
         let result = ledger.apply_transaction(&tx, &engine, 0);
 
         assert!(matches!(result, Err(LedgerError::MissingInput)));
@@ -369,7 +428,7 @@ mod tests {
             witness: vec![build_witness(&simple_script(), None)],
         };
 
-        let engine = NoopScriptEngine::default();
+        let engine = DeterministicScriptEngine::default();
         let result = ledger.apply_transaction(&spending_tx, &engine, 0);
 
         assert!(matches!(
@@ -400,14 +459,14 @@ mod tests {
                     index: 0,
                 },
             ],
-            outputs: vec![simple_utxo()],
+            outputs: vec![simple_output()],
             witness: vec![
                 build_witness(&simple_script(), None),
                 build_witness(&simple_script(), None),
             ],
         };
 
-        let engine = NoopScriptEngine::default();
+        let engine = DeterministicScriptEngine::default();
         let result = ledger.apply_transaction(&tx, &engine, 0);
 
         assert!(matches!(result, Err(LedgerError::DoubleSpend)));
@@ -432,11 +491,11 @@ mod tests {
                 tx_id: previous_tx_id,
                 index: 0,
             }],
-            outputs: vec![simple_utxo()],
+            outputs: vec![simple_output()],
             witness: vec![build_witness(&incorrect_script, None)],
         };
 
-        let engine = NoopScriptEngine::default();
+        let engine = DeterministicScriptEngine::default();
         let result = ledger.apply_transaction(&tx, &engine, 0);
 
         assert!(matches!(result, Err(LedgerError::ScriptHashMismatch)));
@@ -454,7 +513,7 @@ mod tests {
         let expected_metadata = b"expected".to_vec();
         ledger.utxos.insert(
             utxo_key.clone(),
-            utxo_with_metadata(Some(expected_metadata.clone())),
+            tracked(utxo_with_metadata(Some(expected_metadata.clone()))),
         );
 
         let tx = Transaction {
@@ -463,11 +522,11 @@ mod tests {
                 tx_id: previous_tx_id,
                 index: 0,
             }],
-            outputs: vec![simple_utxo()],
+            outputs: vec![simple_output()],
             witness: vec![build_witness(&simple_script(), Some(b"different".to_vec()))],
         };
 
-        let engine = NoopScriptEngine::default();
+        let engine = DeterministicScriptEngine::default();
         let result = ledger.apply_transaction(&tx, &engine, 0);
 
         assert!(matches!(result, Err(LedgerError::MetadataHashMismatch)));
@@ -483,9 +542,10 @@ mod tests {
             index: 0,
         };
         let metadata = b"game-asset".to_vec();
-        ledger
-            .utxos
-            .insert(utxo_key.clone(), utxo_with_metadata(Some(metadata.clone())));
+        ledger.utxos.insert(
+            utxo_key.clone(),
+            tracked(utxo_with_metadata(Some(metadata.clone()))),
+        );
 
         let tx = Transaction {
             kind: TransactionKind::Transfer,
@@ -493,11 +553,11 @@ mod tests {
                 tx_id: previous_tx_id,
                 index: 0,
             }],
-            outputs: vec![simple_utxo()],
+            outputs: vec![simple_output()],
             witness: vec![build_witness(&simple_script(), Some(metadata))],
         };
 
-        let engine = NoopScriptEngine::default();
+        let engine = DeterministicScriptEngine::default();
         ledger
             .apply_transaction(&tx, &engine, 0)
             .expect("transaction should succeed");
@@ -521,7 +581,7 @@ mod tests {
                 tx_id: previous_tx_id,
                 index: 0,
             }],
-            outputs: vec![simple_utxo()],
+            outputs: vec![simple_output()],
             witness: vec![build_witness(&simple_script(), None)],
         };
 
@@ -551,7 +611,7 @@ mod tests {
             *blake3::hash(&serialized).as_bytes()
         };
 
-        let engine = NoopScriptEngine::default();
+        let engine = DeterministicScriptEngine::default();
         chain
             .apply_block(&block, &engine)
             .expect("block application should succeed");

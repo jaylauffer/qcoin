@@ -11,3 +11,4 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 qcoin-crypto = { path = "../qcoin-crypto" }
 qcoin-types = { path = "../qcoin-types" }
+blake3 = "1"
