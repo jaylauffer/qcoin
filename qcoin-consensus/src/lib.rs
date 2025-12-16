@@ -57,7 +57,9 @@ impl DummyConsensusEngine {
             let scheme = registry
                 .get(&signing_scheme)
                 .expect("signing scheme must be registered for dummy consensus");
-            scheme.keygen()
+            scheme
+                .keygen()
+                .expect("key generation must succeed for dummy consensus")
         };
         let validators = vec![public_key.clone()];
 
@@ -168,7 +170,8 @@ impl ConsensusEngine for DummyConsensusEngine {
         let signature = self
             .scheme(&self.signing_scheme)
             .expect("signing scheme must be available")
-            .sign(&self.signing_key, &header_bytes);
+            .sign(&self.signing_key, &header_bytes)
+            .map_err(|_| ConsensusError::SignatureError)?;
 
         Ok(Block {
             header,
@@ -214,9 +217,9 @@ impl ConsensusEngine for DummyConsensusEngine {
             .scheme(&block.signature.scheme)
             .ok_or(ConsensusError::SignatureError)?;
 
-        if !scheme.verify(&block.proposer_public_key, &header_bytes, &block.signature) {
-            return Err(ConsensusError::SignatureError);
-        }
+        scheme
+            .verify(&block.proposer_public_key, &header_bytes, &block.signature)
+            .map_err(|_| ConsensusError::SignatureError)?;
 
         Ok(())
     }
@@ -323,7 +326,8 @@ mod tests {
         wrong_proposer_block.signature = alternate_engine
             .scheme(&alternate_engine.signing_scheme)
             .expect("scheme should exist")
-            .sign(&alternate_engine.signing_key, &header_bytes);
+            .sign(&alternate_engine.signing_key, &header_bytes)
+            .expect("signing should succeed");
 
         let result = engine.validate_block(&chain, &wrong_proposer_block);
         assert!(matches!(result, Err(ConsensusError::InvalidBlock)));
@@ -346,7 +350,8 @@ mod tests {
         tampered.signature = engine
             .scheme(&engine.signing_scheme)
             .expect("scheme should exist")
-            .sign(&engine.signing_key, &header_bytes);
+            .sign(&engine.signing_key, &header_bytes)
+            .expect("signing should succeed");
 
         let result = engine.validate_block(&chain, &tampered);
         assert!(matches!(result, Err(ConsensusError::InvalidBlock)));

@@ -150,13 +150,10 @@ impl LedgerState {
         }
 
         if matches!(tx.kind, qcoin_types::TransactionKind::CreateAsset) {
-            for asset in output_totals
-                .iter()
-                .map(|(asset_id, amount)| AssetAmount {
-                    asset_id: AssetId(*asset_id),
-                    amount: *amount,
-                })
-            {
+            for asset in output_totals.iter().map(|(asset_id, amount)| AssetAmount {
+                asset_id: AssetId(*asset_id),
+                amount: *amount,
+            }) {
                 accumulate_asset(&mut input_totals, &asset);
             }
         }
