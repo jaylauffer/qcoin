@@ -85,6 +85,8 @@ pub fn create_asset_transaction(
     issuer_script_hash: Hash256,
     kind: AssetKind,
     metadata_root: Hash256,
+    initial_supply: u128,
+    destination_script_hash: Hash256,
 ) -> (AssetDefinition, Transaction) {
     let kind_byte = match kind {
         AssetKind::Fungible => 0u8,
@@ -108,7 +110,14 @@ pub fn create_asset_transaction(
     let transaction = Transaction {
         kind: TransactionKind::CreateAsset,
         inputs: vec![],
-        outputs: vec![],
+        outputs: vec![Output {
+            owner_script_hash: destination_script_hash,
+            assets: vec![AssetAmount {
+                asset_id: asset_id.clone(),
+                amount: initial_supply,
+            }],
+            metadata_hash: None,
+        }],
         witness: vec![],
     };
 
@@ -154,15 +163,22 @@ mod tests {
     }
 
     #[test]
-    fn create_asset_transaction_derives_expected_asset_id() {
+    fn create_asset_transaction_derives_expected_asset_id_and_supply() {
         let issuer_script_hash = [4u8; 32];
         let metadata_root = [9u8; 32];
-        let (definition, transaction) =
-            create_asset_transaction(issuer_script_hash, AssetKind::SemiFungible, metadata_root);
+        let destination_script_hash = [8u8; 32];
+        let initial_supply = 500;
+        let (definition, transaction) = create_asset_transaction(
+            issuer_script_hash,
+            AssetKind::SemiFungible,
+            metadata_root,
+            initial_supply,
+            destination_script_hash,
+        );
 
         assert_eq!(transaction.kind, TransactionKind::CreateAsset);
         assert!(transaction.inputs.is_empty());
-        assert!(transaction.outputs.is_empty());
+        assert_eq!(transaction.outputs.len(), 1);
 
         let expected_kind_byte = 2u8;
         let mut hasher = blake3::Hasher::new();
@@ -175,5 +191,19 @@ mod tests {
         assert_eq!(definition.kind, AssetKind::SemiFungible);
         assert_eq!(definition.issuer_script_hash, issuer_script_hash);
         assert_eq!(definition.metadata_root, metadata_root);
+
+        let minted_output = transaction
+            .outputs
+            .first()
+            .expect("minted output should exist");
+        assert_eq!(minted_output.owner_script_hash, destination_script_hash);
+        assert_eq!(minted_output.assets.len(), 1);
+        let minted_asset = minted_output
+            .assets
+            .first()
+            .expect("minted asset amount should be present");
+        assert_eq!(minted_asset.asset_id, expected_asset_id);
+        assert_eq!(minted_asset.amount, initial_supply);
+        assert!(minted_output.metadata_hash.is_none());
     }
 }
