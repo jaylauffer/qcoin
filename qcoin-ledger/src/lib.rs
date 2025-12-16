@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use qcoin_script::{Script, ScriptContext, ScriptEngine};
-use qcoin_types::{AssetAmount, Block, Hash256, Output, Transaction};
+use qcoin_types::{AssetAmount, AssetId, Block, Hash256, Output, Transaction};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -149,6 +149,18 @@ impl LedgerState {
             }
         }
 
+        if matches!(tx.kind, qcoin_types::TransactionKind::CreateAsset) {
+            for asset in output_totals
+                .iter()
+                .map(|(asset_id, amount)| AssetAmount {
+                    asset_id: AssetId(*asset_id),
+                    amount: *amount,
+                })
+            {
+                accumulate_asset(&mut input_totals, &asset);
+            }
+        }
+
         for (asset_id, input_amount) in input_totals.iter() {
             let output_amount = output_totals.get(asset_id).copied().unwrap_or_default();
             if *input_amount != output_amount {
@@ -212,7 +224,10 @@ mod tests {
     use super::*;
     use qcoin_crypto::{PublicKey, Signature, SignatureSchemeId};
     use qcoin_script::{NoopScriptEngine, OpCode, Script};
-    use qcoin_types::{AssetId, Block, BlockHeader, TransactionInput, TransactionKind};
+    use qcoin_types::{
+        create_asset_transaction, AssetId, AssetKind, Block, BlockHeader, TransactionInput,
+        TransactionKind,
+    };
 
     fn simple_script() -> Script {
         Script(vec![OpCode::Nop])
@@ -247,6 +262,68 @@ mod tests {
             }],
             metadata_hash: metadata.as_ref().map(|bytes| hash_bytes(bytes)),
         }
+    }
+
+    #[test]
+    fn create_asset_transaction_mints_supply_and_is_spendable() {
+        let mut ledger = LedgerState::default();
+        let asset_script = simple_script();
+        let destination_script_hash = script_hash(&asset_script);
+        let issuer_script_hash = [21u8; 32];
+        let metadata_root = [22u8; 32];
+        let initial_supply = 75;
+
+        let (definition, create_tx) = create_asset_transaction(
+            issuer_script_hash,
+            AssetKind::Fungible,
+            metadata_root,
+            initial_supply,
+            destination_script_hash,
+        );
+
+        let engine = NoopScriptEngine::default();
+        ledger
+            .apply_transaction(&create_tx, &engine, 0)
+            .expect("asset creation should succeed");
+
+        let minted_utxo_key = UtxoKey {
+            tx_id: create_tx.tx_id(),
+            index: 0,
+        };
+        let minted_output = ledger
+            .utxos
+            .get(&minted_utxo_key)
+            .expect("minted output should be recorded");
+        assert_eq!(minted_output.owner_script_hash, destination_script_hash);
+        assert_eq!(minted_output.assets.len(), 1);
+        let minted_asset = &minted_output.assets[0];
+        assert_eq!(minted_asset.asset_id, definition.asset_id);
+        assert_eq!(minted_asset.amount, initial_supply);
+
+        let spend_tx = Transaction {
+            kind: TransactionKind::Transfer,
+            inputs: vec![TransactionInput {
+                tx_id: minted_utxo_key.tx_id,
+                index: minted_utxo_key.index,
+            }],
+            outputs: vec![Output {
+                owner_script_hash: destination_script_hash,
+                assets: minted_output.assets.clone(),
+                metadata_hash: None,
+            }],
+            witness: vec![build_witness(&asset_script, None)],
+        };
+
+        ledger
+            .apply_transaction(&spend_tx, &engine, 1)
+            .expect("spend transaction should succeed");
+
+        assert!(!ledger.utxos.contains_key(&minted_utxo_key));
+        let new_utxo_key = UtxoKey {
+            tx_id: spend_tx.tx_id(),
+            index: 0,
+        };
+        assert!(ledger.utxos.contains_key(&new_utxo_key));
     }
 
     #[test]
