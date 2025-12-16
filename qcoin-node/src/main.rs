@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use qcoin_consensus::{ConsensusEngine, DummyConsensusEngine};
 use qcoin_crypto::{default_registry, PqSchemeRegistry, SignatureSchemeId};
 use qcoin_ledger::{ChainState, LedgerState};
-use qcoin_script::NoopScriptEngine;
+use qcoin_script::DeterministicScriptEngine;
 use qcoin_types::Transaction;
 use serde::Serialize;
 
@@ -56,7 +56,7 @@ fn main() {
 }
 
 fn run_node() {
-    let script_engine = NoopScriptEngine::default();
+    let script_engine = DeterministicScriptEngine::default();
 
     let ledger = LedgerState {
         utxos: Default::default(),
