@@ -23,6 +23,8 @@ pub struct ChainState {
     pub ledger: LedgerState,
     pub height: u64,
     pub tip_hash: Hash256,
+    pub state_root: Hash256,
+    pub last_timestamp: u64,
 }
 
 #[derive(Debug, Error)]
@@ -58,6 +60,21 @@ fn hash_bytes(data: &[u8]) -> Hash256 {
 }
 
 impl LedgerState {
+    pub fn state_root(&self) -> Hash256 {
+        let mut entries: Vec<_> = self.utxos.iter().collect();
+        entries.sort_by(|(a, _), (b, _)| a.tx_id.cmp(&b.tx_id).then_with(|| a.index.cmp(&b.index)));
+
+        let mut hasher = blake3::Hasher::new();
+
+        for (key, output) in entries {
+            let serialized =
+                bincode::serialize(&(key, output)).expect("UTXO serialization should succeed");
+            hasher.update(&serialized);
+        }
+
+        *hasher.finalize().as_bytes()
+    }
+
     pub fn apply_transaction<E: ScriptEngine>(
         &mut self,
         tx: &Transaction,
@@ -183,6 +200,8 @@ impl ChainState {
             .expect("block header serialization should be infallible");
         let hash = blake3::hash(&serialized);
         self.tip_hash = *hash.as_bytes();
+        self.state_root = self.ledger.state_root();
+        self.last_timestamp = block.header.timestamp;
 
         Ok(())
     }

@@ -11,5 +11,6 @@ thiserror = "1"
 qcoin-types = { path = "../qcoin-types" }
 qcoin-ledger = { path = "../qcoin-ledger" }
 qcoin-crypto = { path = "../qcoin-crypto" }
+qcoin-script = { path = "../qcoin-script" }
 bincode = "1"
 blake3 = "1"
