@@ -157,11 +157,8 @@ mod tests {
     fn create_asset_transaction_derives_expected_asset_id() {
         let issuer_script_hash = [4u8; 32];
         let metadata_root = [9u8; 32];
-        let (definition, transaction) = create_asset_transaction(
-            issuer_script_hash,
-            AssetKind::SemiFungible,
-            metadata_root,
-        );
+        let (definition, transaction) =
+            create_asset_transaction(issuer_script_hash, AssetKind::SemiFungible, metadata_root);
 
         assert_eq!(transaction.kind, TransactionKind::CreateAsset);
         assert!(transaction.inputs.is_empty());
