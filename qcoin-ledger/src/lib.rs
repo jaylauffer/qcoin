@@ -29,14 +29,32 @@ pub struct ChainState {
 pub enum LedgerError {
     #[error("input not found in UTXO set")]
     MissingInput,
+    #[error("missing witness data for input")]
+    MissingWitness,
     #[error("double spend detected")]
     DoubleSpend,
+    #[error("owner script hash does not match provided script")]
+    ScriptHashMismatch,
+    #[error("output metadata hash does not match provided metadata")]
+    MetadataHashMismatch,
+    #[error("failed to decode witness data")]
+    InvalidWitness,
     #[error("script execution failed")]
     ScriptFailed,
     #[error("asset conservation violated")]
     AssetConservationViolation,
     #[error("other ledger error: {0}")]
     Other(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct InputWitness {
+    script: Script,
+    metadata: Option<Vec<u8>>,
+}
+
+fn hash_bytes(data: &[u8]) -> Hash256 {
+    *blake3::hash(data).as_bytes()
 }
 
 impl LedgerState {
@@ -73,9 +91,33 @@ impl LedgerState {
                 current_height: Some(current_height),
             };
 
-            let script = Script(Vec::new());
+            let witness_bytes = tx
+                .witness
+                .get(input_index)
+                .ok_or(LedgerError::MissingWitness)?;
+
+            let witness: InputWitness =
+                bincode::deserialize(witness_bytes).map_err(|_| LedgerError::InvalidWitness)?;
+
+            let script_bytes =
+                bincode::serialize(&witness.script).map_err(|_| LedgerError::InvalidWitness)?;
+            let script_hash = hash_bytes(&script_bytes);
+
+            if script_hash != referenced_output.owner_script_hash {
+                return Err(LedgerError::ScriptHashMismatch);
+            }
+
+            match (
+                referenced_output.metadata_hash.as_ref(),
+                witness.metadata.as_ref(),
+            ) {
+                (Some(expected), Some(bytes)) if *expected == hash_bytes(bytes) => {}
+                (None, None) => {}
+                _ => return Err(LedgerError::MetadataHashMismatch),
+            }
+
             engine
-                .eval(&script, &ctx)
+                .eval(&witness.script, &ctx)
                 .map_err(|_| LedgerError::ScriptFailed)?;
 
             consumed_utxos.push(key);
@@ -150,21 +192,41 @@ impl ChainState {
 mod tests {
     use super::*;
     use qcoin_crypto::{PublicKey, Signature, SignatureSchemeId};
-    use qcoin_script::NoopScriptEngine;
+    use qcoin_script::{NoopScriptEngine, OpCode, Script};
     use qcoin_types::{AssetId, Block, BlockHeader, TransactionInput, TransactionKind};
+
+    fn simple_script() -> Script {
+        Script(vec![OpCode::Nop])
+    }
+
+    fn script_hash(script: &Script) -> Hash256 {
+        hash_bytes(&bincode::serialize(script).expect("script serialization should succeed"))
+    }
+
+    fn build_witness(script: &Script, metadata: Option<Vec<u8>>) -> Vec<u8> {
+        bincode::serialize(&InputWitness {
+            script: script.clone(),
+            metadata,
+        })
+        .expect("witness serialization should succeed")
+    }
 
     fn simple_asset_id() -> AssetId {
         AssetId([1u8; 32])
     }
 
     fn simple_utxo() -> Output {
+        utxo_with_metadata(None)
+    }
+
+    fn utxo_with_metadata(metadata: Option<Vec<u8>>) -> Output {
         Output {
-            owner_script_hash: [0u8; 32],
+            owner_script_hash: script_hash(&simple_script()),
             assets: vec![AssetAmount {
                 asset_id: simple_asset_id(),
                 amount: 100,
             }],
-            metadata_hash: None,
+            metadata_hash: metadata.as_ref().map(|bytes| hash_bytes(bytes)),
         }
     }
 
@@ -204,14 +266,14 @@ mod tests {
                 index: 0,
             }],
             outputs: vec![Output {
-                owner_script_hash: [0u8; 32],
+                owner_script_hash: script_hash(&simple_script()),
                 assets: vec![AssetAmount {
                     asset_id: simple_asset_id(),
                     amount: 200,
                 }],
                 metadata_hash: None,
             }],
-            witness: vec![],
+            witness: vec![build_witness(&simple_script(), None)],
         };
 
         let engine = NoopScriptEngine::default();
@@ -246,7 +308,10 @@ mod tests {
                 },
             ],
             outputs: vec![simple_utxo()],
-            witness: vec![],
+            witness: vec![
+                build_witness(&simple_script(), None),
+                build_witness(&simple_script(), None),
+            ],
         };
 
         let engine = NoopScriptEngine::default();
@@ -254,6 +319,97 @@ mod tests {
 
         assert!(matches!(result, Err(LedgerError::DoubleSpend)));
         assert!(ledger.utxos.contains_key(&utxo_key));
+    }
+
+    #[test]
+    fn test_script_hash_mismatch_rejected() {
+        let mut ledger = LedgerState::default();
+        let previous_tx_id = [13u8; 32];
+        let utxo_key = UtxoKey {
+            tx_id: previous_tx_id,
+            index: 0,
+        };
+        ledger.utxos.insert(utxo_key.clone(), simple_utxo());
+
+        let incorrect_script = Script(vec![OpCode::Nop, OpCode::Nop]);
+
+        let tx = Transaction {
+            kind: TransactionKind::Transfer,
+            inputs: vec![TransactionInput {
+                tx_id: previous_tx_id,
+                index: 0,
+            }],
+            outputs: vec![simple_utxo()],
+            witness: vec![build_witness(&incorrect_script, None)],
+        };
+
+        let engine = NoopScriptEngine::default();
+        let result = ledger.apply_transaction(&tx, &engine, 0);
+
+        assert!(matches!(result, Err(LedgerError::ScriptHashMismatch)));
+        assert!(ledger.utxos.contains_key(&utxo_key));
+    }
+
+    #[test]
+    fn test_metadata_hash_mismatch_rejected() {
+        let mut ledger = LedgerState::default();
+        let previous_tx_id = [14u8; 32];
+        let utxo_key = UtxoKey {
+            tx_id: previous_tx_id,
+            index: 0,
+        };
+        let expected_metadata = b"expected".to_vec();
+        ledger.utxos.insert(
+            utxo_key.clone(),
+            utxo_with_metadata(Some(expected_metadata.clone())),
+        );
+
+        let tx = Transaction {
+            kind: TransactionKind::Transfer,
+            inputs: vec![TransactionInput {
+                tx_id: previous_tx_id,
+                index: 0,
+            }],
+            outputs: vec![simple_utxo()],
+            witness: vec![build_witness(&simple_script(), Some(b"different".to_vec()))],
+        };
+
+        let engine = NoopScriptEngine::default();
+        let result = ledger.apply_transaction(&tx, &engine, 0);
+
+        assert!(matches!(result, Err(LedgerError::MetadataHashMismatch)));
+        assert!(ledger.utxos.contains_key(&utxo_key));
+    }
+
+    #[test]
+    fn test_valid_spend_with_metadata_succeeds() {
+        let mut ledger = LedgerState::default();
+        let previous_tx_id = [15u8; 32];
+        let utxo_key = UtxoKey {
+            tx_id: previous_tx_id,
+            index: 0,
+        };
+        let metadata = b"game-asset".to_vec();
+        ledger
+            .utxos
+            .insert(utxo_key.clone(), utxo_with_metadata(Some(metadata.clone())));
+
+        let tx = Transaction {
+            kind: TransactionKind::Transfer,
+            inputs: vec![TransactionInput {
+                tx_id: previous_tx_id,
+                index: 0,
+            }],
+            outputs: vec![simple_utxo()],
+            witness: vec![build_witness(&simple_script(), Some(metadata))],
+        };
+
+        let engine = NoopScriptEngine::default();
+        ledger
+            .apply_transaction(&tx, &engine, 0)
+            .expect("transaction should succeed");
+
+        assert!(!ledger.utxos.contains_key(&utxo_key));
     }
 
     #[test]
@@ -273,7 +429,7 @@ mod tests {
                 index: 0,
             }],
             outputs: vec![simple_utxo()],
-            witness: vec![],
+            witness: vec![build_witness(&simple_script(), None)],
         };
 
         let tx_id = spend_tx.tx_id();
