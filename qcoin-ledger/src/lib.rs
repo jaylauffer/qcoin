@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use qcoin_script::{ResolvedInput, Script, ScriptContext, ScriptEngine, ScriptHost};
-use qcoin_types::{AssetAmount, AssetId, Block, Hash256, Output, Transaction};
+use qcoin_script::{
+    consensus_codec as script_codec, ResolvedInput, Script, ScriptContext, ScriptEngine, ScriptHost,
+};
+use qcoin_types::{consensus_codec, AssetAmount, AssetId, Block, Hash256, Output, Transaction};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -105,9 +107,13 @@ impl LedgerState {
         let mut hasher = blake3::Hasher::new();
 
         for (key, output) in entries {
-            let serialized =
-                bincode::serialize(&(key, output)).expect("UTXO serialization should succeed");
-            hasher.update(&serialized);
+            let mut encoded = Vec::new();
+            encoded.extend_from_slice(&key.tx_id);
+            encoded.extend_from_slice(&key.index.to_le_bytes());
+            consensus_codec::encode_output_into(&output.output, &mut encoded);
+            encoded.extend_from_slice(&output.created_height.to_le_bytes());
+
+            hasher.update(&encoded);
         }
 
         *hasher.finalize().as_bytes()
@@ -125,7 +131,7 @@ impl LedgerState {
         let mut output_totals: HashMap<Hash256, u128> = HashMap::new();
         let host = LedgerScriptHost::new(&self.utxos, current_height);
 
-        for (input_index, input) in tx.inputs.iter().enumerate() {
+        for (input_index, input) in tx.core.inputs.iter().enumerate() {
             let key = UtxoKey {
                 tx_id: input.tx_id,
                 index: input.index,
@@ -145,18 +151,20 @@ impl LedgerState {
                 tx: tx.clone(),
                 input_index,
                 current_height: Some(current_height),
+                chain_id: 0,
+                script_hash: referenced_output.output.owner_script_hash,
             };
 
             let witness_bytes = tx
                 .witness
+                .inputs
                 .get(input_index)
                 .ok_or(LedgerError::MissingWitness)?;
 
             let witness: InputWitness =
                 bincode::deserialize(witness_bytes).map_err(|_| LedgerError::InvalidWitness)?;
 
-            let script_bytes =
-                bincode::serialize(&witness.script).map_err(|_| LedgerError::InvalidWitness)?;
+            let script_bytes = script_codec::encode_script(&witness.script);
             let script_hash = hash_bytes(&script_bytes);
 
             if script_hash != referenced_output.output.owner_script_hash {
@@ -182,13 +190,13 @@ impl LedgerState {
             }
         }
 
-        for output in &tx.outputs {
+        for output in &tx.core.outputs {
             for asset in &output.assets {
                 accumulate_asset(&mut output_totals, asset);
             }
         }
 
-        if matches!(tx.kind, qcoin_types::TransactionKind::CreateAsset) {
+        if matches!(tx.core.kind, qcoin_types::TransactionKind::CreateAsset) {
             for asset in output_totals.iter().map(|(asset_id, amount)| AssetAmount {
                 asset_id: AssetId(*asset_id),
                 amount: *amount,
@@ -215,7 +223,7 @@ impl LedgerState {
         }
 
         let tx_id = tx.tx_id();
-        for (index, output) in tx.outputs.iter().cloned().enumerate() {
+        for (index, output) in tx.core.outputs.iter().cloned().enumerate() {
             let key = UtxoKey {
                 tx_id,
                 index: index as u32,
@@ -250,8 +258,7 @@ impl ChainState {
         }
 
         self.height = block.header.height;
-        let serialized = bincode::serialize(&block.header)
-            .expect("block header serialization should be infallible");
+        let serialized = consensus_codec::encode_block_header(&block.header);
         let hash = blake3::hash(&serialized);
         self.tip_hash = *hash.as_bytes();
         self.state_root = self.ledger.state_root();
@@ -267,8 +274,8 @@ mod tests {
     use qcoin_crypto::{PublicKey, Signature, SignatureSchemeId};
     use qcoin_script::{DeterministicScriptEngine, OpCode, Script};
     use qcoin_types::{
-        create_asset_transaction, AssetId, AssetKind, Block, BlockHeader, TransactionInput,
-        TransactionKind,
+        create_asset_transaction, AssetId, AssetKind, Block, BlockHeader, TransactionCore,
+        TransactionInput, TransactionKind, TransactionWitness,
     };
 
     fn simple_script() -> Script {
@@ -276,7 +283,7 @@ mod tests {
     }
 
     fn script_hash(script: &Script) -> Hash256 {
-        hash_bytes(&bincode::serialize(script).expect("script serialization should succeed"))
+        hash_bytes(&script_codec::encode_script(script))
     }
 
     fn build_witness(script: &Script, metadata: Option<Vec<u8>>) -> Vec<u8> {
@@ -357,17 +364,21 @@ mod tests {
         assert_eq!(minted_asset.amount, initial_supply);
 
         let spend_tx = Transaction {
-            kind: TransactionKind::Transfer,
-            inputs: vec![TransactionInput {
-                tx_id: minted_utxo_key.tx_id,
-                index: minted_utxo_key.index,
-            }],
-            outputs: vec![Output {
-                owner_script_hash: destination_script_hash,
-                assets: minted_output.output.assets.clone(),
-                metadata_hash: None,
-            }],
-            witness: vec![build_witness(&asset_script, None)],
+            core: TransactionCore {
+                kind: TransactionKind::Transfer,
+                inputs: vec![TransactionInput {
+                    tx_id: minted_utxo_key.tx_id,
+                    index: minted_utxo_key.index,
+                }],
+                outputs: vec![Output {
+                    owner_script_hash: destination_script_hash,
+                    assets: minted_output.output.assets.clone(),
+                    metadata_hash: None,
+                }],
+            },
+            witness: TransactionWitness {
+                inputs: vec![build_witness(&asset_script, None)],
+            },
         };
 
         ledger
@@ -386,13 +397,15 @@ mod tests {
     fn test_missing_input_fails() {
         let mut ledger = LedgerState::default();
         let tx = Transaction {
-            kind: TransactionKind::Transfer,
-            inputs: vec![TransactionInput {
-                tx_id: [9u8; 32],
-                index: 0,
-            }],
-            outputs: vec![],
-            witness: vec![],
+            core: TransactionCore {
+                kind: TransactionKind::Transfer,
+                inputs: vec![TransactionInput {
+                    tx_id: [9u8; 32],
+                    index: 0,
+                }],
+                outputs: vec![],
+            },
+            witness: TransactionWitness::default(),
         };
 
         let engine = DeterministicScriptEngine::default();
@@ -412,20 +425,24 @@ mod tests {
         ledger.utxos.insert(utxo_key, simple_utxo());
 
         let spending_tx = Transaction {
-            kind: TransactionKind::Transfer,
-            inputs: vec![TransactionInput {
-                tx_id: previous_tx_id,
-                index: 0,
-            }],
-            outputs: vec![Output {
-                owner_script_hash: script_hash(&simple_script()),
-                assets: vec![AssetAmount {
-                    asset_id: simple_asset_id(),
-                    amount: 200,
+            core: TransactionCore {
+                kind: TransactionKind::Transfer,
+                inputs: vec![TransactionInput {
+                    tx_id: previous_tx_id,
+                    index: 0,
                 }],
-                metadata_hash: None,
-            }],
-            witness: vec![build_witness(&simple_script(), None)],
+                outputs: vec![Output {
+                    owner_script_hash: script_hash(&simple_script()),
+                    assets: vec![AssetAmount {
+                        asset_id: simple_asset_id(),
+                        amount: 200,
+                    }],
+                    metadata_hash: None,
+                }],
+            },
+            witness: TransactionWitness {
+                inputs: vec![build_witness(&simple_script(), None)],
+            },
         };
 
         let engine = DeterministicScriptEngine::default();
@@ -448,22 +465,26 @@ mod tests {
         ledger.utxos.insert(utxo_key.clone(), simple_utxo());
 
         let tx = Transaction {
-            kind: TransactionKind::Transfer,
-            inputs: vec![
-                TransactionInput {
-                    tx_id: previous_tx_id,
-                    index: 0,
-                },
-                TransactionInput {
-                    tx_id: previous_tx_id,
-                    index: 0,
-                },
-            ],
-            outputs: vec![simple_output()],
-            witness: vec![
-                build_witness(&simple_script(), None),
-                build_witness(&simple_script(), None),
-            ],
+            core: TransactionCore {
+                kind: TransactionKind::Transfer,
+                inputs: vec![
+                    TransactionInput {
+                        tx_id: previous_tx_id,
+                        index: 0,
+                    },
+                    TransactionInput {
+                        tx_id: previous_tx_id,
+                        index: 0,
+                    },
+                ],
+                outputs: vec![simple_output()],
+            },
+            witness: TransactionWitness {
+                inputs: vec![
+                    build_witness(&simple_script(), None),
+                    build_witness(&simple_script(), None),
+                ],
+            },
         };
 
         let engine = DeterministicScriptEngine::default();
@@ -486,13 +507,17 @@ mod tests {
         let incorrect_script = Script(vec![OpCode::Nop, OpCode::Nop]);
 
         let tx = Transaction {
-            kind: TransactionKind::Transfer,
-            inputs: vec![TransactionInput {
-                tx_id: previous_tx_id,
-                index: 0,
-            }],
-            outputs: vec![simple_output()],
-            witness: vec![build_witness(&incorrect_script, None)],
+            core: TransactionCore {
+                kind: TransactionKind::Transfer,
+                inputs: vec![TransactionInput {
+                    tx_id: previous_tx_id,
+                    index: 0,
+                }],
+                outputs: vec![simple_output()],
+            },
+            witness: TransactionWitness {
+                inputs: vec![build_witness(&incorrect_script, None)],
+            },
         };
 
         let engine = DeterministicScriptEngine::default();
@@ -517,13 +542,17 @@ mod tests {
         );
 
         let tx = Transaction {
-            kind: TransactionKind::Transfer,
-            inputs: vec![TransactionInput {
-                tx_id: previous_tx_id,
-                index: 0,
-            }],
-            outputs: vec![simple_output()],
-            witness: vec![build_witness(&simple_script(), Some(b"different".to_vec()))],
+            core: TransactionCore {
+                kind: TransactionKind::Transfer,
+                inputs: vec![TransactionInput {
+                    tx_id: previous_tx_id,
+                    index: 0,
+                }],
+                outputs: vec![simple_output()],
+            },
+            witness: TransactionWitness {
+                inputs: vec![build_witness(&simple_script(), Some(b"different".to_vec()))],
+            },
         };
 
         let engine = DeterministicScriptEngine::default();
@@ -548,13 +577,17 @@ mod tests {
         );
 
         let tx = Transaction {
-            kind: TransactionKind::Transfer,
-            inputs: vec![TransactionInput {
-                tx_id: previous_tx_id,
-                index: 0,
-            }],
-            outputs: vec![simple_output()],
-            witness: vec![build_witness(&simple_script(), Some(metadata))],
+            core: TransactionCore {
+                kind: TransactionKind::Transfer,
+                inputs: vec![TransactionInput {
+                    tx_id: previous_tx_id,
+                    index: 0,
+                }],
+                outputs: vec![simple_output()],
+            },
+            witness: TransactionWitness {
+                inputs: vec![build_witness(&simple_script(), Some(metadata))],
+            },
         };
 
         let engine = DeterministicScriptEngine::default();
@@ -576,13 +609,17 @@ mod tests {
         chain.ledger.utxos.insert(utxo_key.clone(), simple_utxo());
 
         let spend_tx = Transaction {
-            kind: TransactionKind::Transfer,
-            inputs: vec![TransactionInput {
-                tx_id: previous_tx_id,
-                index: 0,
-            }],
-            outputs: vec![simple_output()],
-            witness: vec![build_witness(&simple_script(), None)],
+            core: TransactionCore {
+                kind: TransactionKind::Transfer,
+                inputs: vec![TransactionInput {
+                    tx_id: previous_tx_id,
+                    index: 0,
+                }],
+                outputs: vec![simple_output()],
+            },
+            witness: TransactionWitness {
+                inputs: vec![build_witness(&simple_script(), None)],
+            },
         };
 
         let tx_id = spend_tx.tx_id();
@@ -607,7 +644,7 @@ mod tests {
         };
 
         let expected_tip_hash = {
-            let serialized = bincode::serialize(&block.header).unwrap();
+            let serialized = consensus_codec::encode_block_header(&block.header);
             *blake3::hash(&serialized).as_bytes()
         };
 

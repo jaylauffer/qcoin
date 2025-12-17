@@ -7,7 +7,7 @@ use qcoin_crypto::{
 };
 use qcoin_ledger::ChainState;
 use qcoin_script::DeterministicScriptEngine;
-use qcoin_types::{Block, Hash256, Transaction};
+use qcoin_types::{consensus_codec, Block, Hash256, Transaction};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -164,8 +164,7 @@ impl ConsensusEngine for DummyConsensusEngine {
             timestamp,
         };
 
-        let header_bytes = bincode::serialize(&header)
-            .map_err(|err| ConsensusError::Other(format!("failed to serialize header: {err}")))?;
+        let header_bytes = consensus_codec::encode_block_header(&header);
 
         let signature = self
             .scheme(&self.signing_scheme)
@@ -210,8 +209,7 @@ impl ConsensusEngine for DummyConsensusEngine {
             return Err(ConsensusError::InvalidBlock);
         }
 
-        let header_bytes = bincode::serialize(&block.header)
-            .map_err(|err| ConsensusError::Other(format!("failed to serialize header: {err}")))?;
+        let header_bytes = consensus_codec::encode_block_header(&block.header);
 
         let scheme = self
             .scheme(&block.signature.scheme)
@@ -237,10 +235,12 @@ mod tests {
         let chain = ChainState::default();
 
         let tx = Transaction {
-            kind: TransactionKind::Transfer,
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-            witness: Vec::new(),
+            core: qcoin_types::TransactionCore {
+                kind: TransactionKind::Transfer,
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+            },
+            witness: qcoin_types::TransactionWitness::default(),
         };
 
         let mut block = engine
@@ -279,10 +279,12 @@ mod tests {
         let chain = ChainState::default();
 
         let tx = Transaction {
-            kind: TransactionKind::Transfer,
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-            witness: Vec::new(),
+            core: qcoin_types::TransactionCore {
+                kind: TransactionKind::Transfer,
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+            },
+            witness: qcoin_types::TransactionWitness::default(),
         };
 
         let mut block = engine
@@ -321,8 +323,7 @@ mod tests {
 
         let mut wrong_proposer_block = block.clone();
         wrong_proposer_block.proposer_public_key = alternate_engine.public_key.clone();
-        let header_bytes = bincode::serialize(&wrong_proposer_block.header)
-            .expect("header serialization should succeed");
+        let header_bytes = consensus_codec::encode_block_header(&wrong_proposer_block.header);
         wrong_proposer_block.signature = alternate_engine
             .scheme(&alternate_engine.signing_scheme)
             .expect("scheme should exist")
@@ -345,8 +346,7 @@ mod tests {
         let mut tampered = block.clone();
         tampered.header.state_root = [9u8; 32];
 
-        let header_bytes =
-            bincode::serialize(&tampered.header).expect("header serialization should succeed");
+        let header_bytes = consensus_codec::encode_block_header(&tampered.header);
         tampered.signature = engine
             .scheme(&engine.signing_scheme)
             .expect("scheme should exist")

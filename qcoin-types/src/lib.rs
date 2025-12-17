@@ -65,21 +65,60 @@ pub enum TransactionKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Transaction {
+pub struct TransactionCore {
     pub kind: TransactionKind,
     pub inputs: Vec<TransactionInput>,
     pub outputs: Vec<Output>,
-    pub witness: Vec<Vec<u8>>, // raw script/witness data for now
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TransactionWitness {
+    pub inputs: Vec<Vec<u8>>, // raw script/witness data for now
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Transaction {
+    pub core: TransactionCore,
+    pub witness: TransactionWitness,
 }
 
 impl Transaction {
     pub fn tx_id(&self) -> Hash256 {
-        let serialized =
-            bincode::serialize(self).expect("transaction serialization should be infallible");
-        let hash = blake3::hash(&serialized);
-        *hash.as_bytes()
+        self.core.tx_id()
+    }
+
+    pub fn sighash(
+        &self,
+        input_index: usize,
+        prev_output: &Output,
+        script_hash: Hash256,
+        chain_id: u32,
+        flags: SighashFlags,
+    ) -> Hash256 {
+        let mut preimage = Vec::new();
+        const DOMAIN_SEPARATOR: &[u8] = b"QCOIN_SIGHASH_V1";
+
+        preimage.extend_from_slice(DOMAIN_SEPARATOR);
+        preimage.extend_from_slice(&chain_id.to_le_bytes());
+        preimage.extend(consensus_codec::encode_tx_core(&self.core));
+        preimage.extend(consensus_codec::encode_output(prev_output));
+        preimage.extend_from_slice(&(input_index as u64).to_le_bytes());
+        preimage.extend_from_slice(&script_hash);
+        preimage.extend_from_slice(&flags.0.to_le_bytes());
+
+        *blake3::hash(&preimage).as_bytes()
     }
 }
+
+impl TransactionCore {
+    pub fn tx_id(&self) -> Hash256 {
+        let serialized = consensus_codec::encode_tx_core(self);
+        *blake3::hash(&serialized).as_bytes()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SighashFlags(pub u32);
 
 pub fn create_asset_transaction(
     issuer_script_hash: Hash256,
@@ -108,20 +147,102 @@ pub fn create_asset_transaction(
     };
 
     let transaction = Transaction {
-        kind: TransactionKind::CreateAsset,
-        inputs: vec![],
-        outputs: vec![Output {
-            owner_script_hash: destination_script_hash,
-            assets: vec![AssetAmount {
-                asset_id: asset_id.clone(),
-                amount: initial_supply,
+        core: TransactionCore {
+            kind: TransactionKind::CreateAsset,
+            inputs: vec![],
+            outputs: vec![Output {
+                owner_script_hash: destination_script_hash,
+                assets: vec![AssetAmount {
+                    asset_id: asset_id.clone(),
+                    amount: initial_supply,
+                }],
+                metadata_hash: None,
             }],
-            metadata_hash: None,
-        }],
-        witness: vec![],
+        },
+        witness: TransactionWitness::default(),
     };
 
     (definition, transaction)
+}
+
+pub mod consensus_codec {
+    use super::{AssetAmount, BlockHeader, Hash256, Output, TransactionCore, TransactionInput};
+
+    fn encode_len(len: usize, out: &mut Vec<u8>) {
+        let len: u32 = len
+            .try_into()
+            .expect("consensus encoding length should fit into u32");
+        out.extend_from_slice(&len.to_le_bytes());
+    }
+
+    pub fn encode_hash(hash: &Hash256, out: &mut Vec<u8>) {
+        out.extend_from_slice(hash);
+    }
+
+    fn encode_transaction_input(input: &TransactionInput, out: &mut Vec<u8>) {
+        encode_hash(&input.tx_id, out);
+        out.extend_from_slice(&input.index.to_le_bytes());
+    }
+
+    fn encode_asset_amount(asset: &AssetAmount, out: &mut Vec<u8>) {
+        encode_hash(&asset.asset_id.0, out);
+        out.extend_from_slice(&asset.amount.to_le_bytes());
+    }
+
+    pub fn encode_output(output: &Output) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_output_into(output, &mut out);
+        out
+    }
+
+    pub fn encode_output_into(output: &Output, out: &mut Vec<u8>) {
+        encode_hash(&output.owner_script_hash, out);
+        encode_len(output.assets.len(), out);
+        for asset in &output.assets {
+            encode_asset_amount(asset, out);
+        }
+
+        match &output.metadata_hash {
+            Some(hash) => {
+                out.push(1);
+                encode_hash(hash, out);
+            }
+            None => out.push(0),
+        }
+    }
+
+    pub fn encode_tx_core(core: &TransactionCore) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_tx_core_into(core, &mut out);
+        out
+    }
+
+    pub fn encode_tx_core_into(core: &TransactionCore, out: &mut Vec<u8>) {
+        out.push(match core.kind {
+            super::TransactionKind::Transfer => 0,
+            super::TransactionKind::CreateAsset => 1,
+        });
+
+        encode_len(core.inputs.len(), out);
+        for input in &core.inputs {
+            encode_transaction_input(input, out);
+        }
+
+        encode_len(core.outputs.len(), out);
+        for output in &core.outputs {
+            encode_output_into(output, out);
+        }
+    }
+
+    pub fn encode_block_header(header: &BlockHeader) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_hash(&header.parent_hash, &mut out);
+        encode_hash(&header.state_root, &mut out);
+        encode_hash(&header.tx_root, &mut out);
+        out.extend_from_slice(&header.height.to_le_bytes());
+        out.extend_from_slice(&header.timestamp.to_le_bytes());
+        out
+    }
 }
 
 #[cfg(test)]
@@ -130,17 +251,19 @@ mod tests {
 
     fn base_transaction() -> Transaction {
         Transaction {
-            kind: TransactionKind::Transfer,
-            inputs: vec![],
-            outputs: vec![Output {
-                owner_script_hash: [0u8; 32],
-                assets: vec![AssetAmount {
-                    asset_id: AssetId([2u8; 32]),
-                    amount: 10,
+            core: TransactionCore {
+                kind: TransactionKind::Transfer,
+                inputs: vec![],
+                outputs: vec![Output {
+                    owner_script_hash: [0u8; 32],
+                    assets: vec![AssetAmount {
+                        asset_id: AssetId([2u8; 32]),
+                        amount: 10,
+                    }],
+                    metadata_hash: None,
                 }],
-                metadata_hash: None,
-            }],
-            witness: vec![],
+            },
+            witness: TransactionWitness::default(),
         }
     }
 
@@ -149,7 +272,7 @@ mod tests {
         let mut tx = base_transaction();
         let original_id = tx.tx_id();
 
-        tx.outputs.push(Output {
+        tx.core.outputs.push(Output {
             owner_script_hash: [1u8; 32],
             assets: vec![AssetAmount {
                 asset_id: AssetId([3u8; 32]),
@@ -176,9 +299,9 @@ mod tests {
             destination_script_hash,
         );
 
-        assert_eq!(transaction.kind, TransactionKind::CreateAsset);
-        assert!(transaction.inputs.is_empty());
-        assert_eq!(transaction.outputs.len(), 1);
+        assert_eq!(transaction.core.kind, TransactionKind::CreateAsset);
+        assert!(transaction.core.inputs.is_empty());
+        assert_eq!(transaction.core.outputs.len(), 1);
 
         let expected_kind_byte = 2u8;
         let mut hasher = blake3::Hasher::new();
@@ -193,6 +316,7 @@ mod tests {
         assert_eq!(definition.metadata_root, metadata_root);
 
         let minted_output = transaction
+            .core
             .outputs
             .first()
             .expect("minted output should exist");
