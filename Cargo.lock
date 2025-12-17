@@ -289,7 +289,6 @@ dependencies = [
 name = "qcoin-consensus"
 version = "0.1.0"
 dependencies = [
- "bincode",
  "blake3",
  "qcoin-crypto",
  "qcoin-ledger",
@@ -352,7 +351,6 @@ dependencies = [
 name = "qcoin-types"
 version = "0.1.0"
 dependencies = [
- "bincode",
  "blake3",
  "qcoin-crypto",
  "serde",

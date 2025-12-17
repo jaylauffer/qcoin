@@ -1,6 +1,6 @@
 use blake3::hash;
 use qcoin_crypto::{default_registry, PqSchemeRegistry, PublicKey, Signature};
-use qcoin_types::{Output, Transaction, TransactionInput};
+use qcoin_types::{Output, SighashFlags, Transaction, TransactionInput};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -28,6 +28,8 @@ pub struct ScriptContext {
     pub tx: Transaction,
     pub input_index: usize,
     pub current_height: Option<u64>,
+    pub chain_id: u32,
+    pub script_hash: qcoin_types::Hash256,
 }
 
 #[derive(Debug, Error)]
@@ -100,6 +102,44 @@ pub struct DeterministicScriptEngine {
 impl DeterministicScriptEngine {
     pub fn with_config(config: VmConfig) -> Self {
         Self { config }
+    }
+}
+
+pub mod consensus_codec {
+    use super::{OpCode, Script};
+
+    fn encode_len(len: usize, out: &mut Vec<u8>) {
+        let len: u32 = len
+            .try_into()
+            .expect("script encoding length should fit into u32");
+        out.extend_from_slice(&len.to_le_bytes());
+    }
+
+    pub fn encode_script(script: &Script) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_len(script.0.len(), &mut out);
+
+        for op in &script.0 {
+            match op {
+                OpCode::CheckSig => out.push(0),
+                OpCode::CheckMultiSig { threshold, total } => {
+                    out.push(1);
+                    out.push(*threshold);
+                    out.push(*total);
+                }
+                OpCode::CheckTimeLock => out.push(2),
+                OpCode::CheckRelativeTimeLock => out.push(3),
+                OpCode::CheckHashLock => out.push(4),
+                OpCode::PushBytes(data) => {
+                    out.push(5);
+                    encode_len(data.len(), &mut out);
+                    out.extend_from_slice(data);
+                }
+                OpCode::Nop => out.push(6),
+            }
+        }
+
+        out
     }
 }
 
@@ -199,8 +239,24 @@ impl ScriptEngine for DeterministicScriptEngine {
                         ScriptError::Evaluation("signature scheme not registered".to_string())
                     })?;
 
+                    let prev_output = host
+                        .input_utxo(ctx.tx.core.inputs.get(ctx.input_index).ok_or_else(|| {
+                            ScriptError::Evaluation("input index out of bounds".to_string())
+                        })?)
+                        .ok_or_else(|| {
+                            ScriptError::Evaluation("host could not resolve input".to_string())
+                        })?;
+
+                    let sighash = ctx.tx.sighash(
+                        ctx.input_index,
+                        &prev_output.output,
+                        ctx.script_hash,
+                        ctx.chain_id,
+                        SighashFlags::default(),
+                    );
+
                     scheme
-                        .verify(&public_key, &ctx.tx.tx_id(), &signature)
+                        .verify(&public_key, &sighash, &signature)
                         .map_err(|err| {
                             ScriptError::Evaluation(format!("signature verification failed: {err}"))
                         })?;
@@ -244,8 +300,24 @@ impl ScriptEngine for DeterministicScriptEngine {
                             ScriptError::Evaluation("signature scheme not registered".to_string())
                         })?;
 
+                        let prev_output = host
+                            .input_utxo(ctx.tx.core.inputs.get(ctx.input_index).ok_or_else(
+                                || ScriptError::Evaluation("input index out of bounds".to_string()),
+                            )?)
+                            .ok_or_else(|| {
+                                ScriptError::Evaluation("host could not resolve input".to_string())
+                            })?;
+
+                        let sighash = ctx.tx.sighash(
+                            ctx.input_index,
+                            &prev_output.output,
+                            ctx.script_hash,
+                            ctx.chain_id,
+                            SighashFlags::default(),
+                        );
+
                         scheme
-                            .verify(public_key, &ctx.tx.tx_id(), signature)
+                            .verify(public_key, &sighash, signature)
                             .map_err(|err| {
                                 ScriptError::Evaluation(format!(
                                     "multisig verification failed: {err}"
@@ -298,7 +370,7 @@ impl ScriptEngine for DeterministicScriptEngine {
                             .expect("length already checked"),
                     );
 
-                    let input = ctx.tx.inputs.get(ctx.input_index).ok_or_else(|| {
+                    let input = ctx.tx.core.inputs.get(ctx.input_index).ok_or_else(|| {
                         ScriptError::Evaluation("input index out of bounds".to_string())
                     })?;
 
@@ -379,7 +451,10 @@ fn gas_cost(op: &OpCode, max_push_bytes: usize) -> Result<u64, ScriptError> {
 mod tests {
     use super::*;
     use qcoin_crypto::SignatureSchemeId;
-    use qcoin_types::{AssetAmount, AssetId, Hash256, Output, TransactionInput, TransactionKind};
+    use qcoin_types::{
+        AssetAmount, AssetId, Hash256, Output, TransactionCore, TransactionInput, TransactionKind,
+        TransactionWitness,
+    };
     use std::collections::HashMap;
 
     #[derive(Default)]
@@ -419,17 +494,19 @@ mod tests {
         };
 
         let tx = Transaction {
-            kind: TransactionKind::Transfer,
-            inputs: vec![input.clone()],
-            outputs: vec![Output {
-                owner_script_hash: [2u8; 32],
-                assets: vec![AssetAmount {
-                    asset_id: AssetId([3u8; 32]),
-                    amount: 10,
+            core: TransactionCore {
+                kind: TransactionKind::Transfer,
+                inputs: vec![input.clone()],
+                outputs: vec![Output {
+                    owner_script_hash: [2u8; 32],
+                    assets: vec![AssetAmount {
+                        asset_id: AssetId([3u8; 32]),
+                        amount: 10,
+                    }],
+                    metadata_hash: None,
                 }],
-                metadata_hash: None,
-            }],
-            witness: vec![],
+            },
+            witness: TransactionWitness::default(),
         };
 
         (tx, input)
@@ -443,6 +520,10 @@ mod tests {
         value.to_le_bytes().to_vec()
     }
 
+    fn script_hash(script: &Script) -> qcoin_types::Hash256 {
+        *hash(&consensus_codec::encode_script(script)).as_bytes()
+    }
+
     #[test]
     fn checks_signature_successfully() {
         let registry = default_registry();
@@ -452,8 +533,16 @@ mod tests {
         let (pk, sk) = scheme.keygen().expect("keygen should work");
 
         let (tx, input) = sample_tx();
-        let tx_id = tx.tx_id();
-        let signature = scheme.sign(&sk, &tx_id).expect("signing should work");
+        let script = Script(vec![
+            OpCode::PushBytes(pk.to_bytes().expect("pk to bytes")),
+            OpCode::PushBytes(Vec::new()),
+            OpCode::CheckSig,
+        ]);
+
+        let script_hash = script_hash(&script);
+        let prev_output = tx.core.outputs[0].clone();
+        let sighash = tx.sighash(0, &prev_output, script_hash, 0, SighashFlags::default());
+        let signature = scheme.sign(&sk, &sighash).expect("signing should work");
 
         let script = Script(vec![
             OpCode::PushBytes(pk.to_bytes().expect("pk to bytes")),
@@ -464,7 +553,7 @@ mod tests {
         let host = StaticHost::new(Some(10)).with_input(
             input.clone(),
             ResolvedInput {
-                output: tx.outputs[0].clone(),
+                output: tx.core.outputs[0].clone(),
                 created_height: Some(1),
             },
         );
@@ -473,6 +562,8 @@ mod tests {
             tx,
             input_index: 0,
             current_height: Some(10),
+            chain_id: 0,
+            script_hash,
         };
 
         let engine = default_engine();
@@ -500,10 +591,12 @@ mod tests {
             OpCode::CheckSig,
         ]);
 
+        let script_hash = script_hash(&script);
+
         let host = StaticHost::new(Some(5)).with_input(
             input.clone(),
             ResolvedInput {
-                output: tx.outputs[0].clone(),
+                output: tx.core.outputs[0].clone(),
                 created_height: Some(0),
             },
         );
@@ -512,6 +605,8 @@ mod tests {
             tx,
             input_index: 0,
             current_height: Some(5),
+            chain_id: 0,
+            script_hash,
         };
 
         let engine = default_engine();
@@ -529,10 +624,12 @@ mod tests {
             OpCode::CheckTimeLock,
         ]);
 
+        let script_hash = script_hash(&script);
+
         let host = StaticHost::new(Some(10)).with_input(
             input.clone(),
             ResolvedInput {
-                output: tx.outputs[0].clone(),
+                output: tx.core.outputs[0].clone(),
                 created_height: Some(0),
             },
         );
@@ -541,6 +638,8 @@ mod tests {
             tx: tx.clone(),
             input_index: 0,
             current_height: Some(10),
+            chain_id: 0,
+            script_hash,
         };
 
         let engine = default_engine();
@@ -550,7 +649,7 @@ mod tests {
         let host = StaticHost::new(Some(12)).with_input(
             input,
             ResolvedInput {
-                output: tx.outputs[0].clone(),
+                output: tx.core.outputs[0].clone(),
                 created_height: Some(0),
             },
         );
@@ -558,6 +657,8 @@ mod tests {
             tx,
             input_index: 0,
             current_height: Some(12),
+            chain_id: 0,
+            script_hash,
         };
 
         let result = engine.eval(&script, &ctx, &host);
@@ -573,15 +674,19 @@ mod tests {
         ]);
 
         let resolved = ResolvedInput {
-            output: tx.outputs[0].clone(),
+            output: tx.core.outputs[0].clone(),
             created_height: Some(5),
         };
+
+        let script_hash = script_hash(&script);
 
         let host = StaticHost::new(Some(7)).with_input(input.clone(), resolved.clone());
         let ctx = ScriptContext {
             tx: tx.clone(),
             input_index: 0,
             current_height: Some(7),
+            chain_id: 0,
+            script_hash,
         };
         let engine = default_engine();
         let result = engine.eval(&script, &ctx, &host);
@@ -592,6 +697,8 @@ mod tests {
             tx,
             input_index: 0,
             current_height: Some(9),
+            chain_id: 0,
+            script_hash,
         };
         let result = engine.eval(&script, &ctx, &host);
         assert!(result.is_ok());
@@ -609,10 +716,12 @@ mod tests {
             OpCode::CheckHashLock,
         ]);
 
+        let script_hash = script_hash(&script);
+
         let host = StaticHost::new(Some(1)).with_input(
             input,
             ResolvedInput {
-                output: tx.outputs[0].clone(),
+                output: tx.core.outputs[0].clone(),
                 created_height: Some(0),
             },
         );
@@ -620,6 +729,8 @@ mod tests {
             tx,
             input_index: 0,
             current_height: Some(1),
+            chain_id: 0,
+            script_hash,
         };
         let engine = default_engine();
         let result = engine.eval(&script, &ctx, &host);
@@ -639,10 +750,12 @@ mod tests {
         let (tx, input) = sample_tx();
         let script = Script(vec![OpCode::Nop; 10]);
 
+        let script_hash = script_hash(&script);
+
         let host = StaticHost::new(Some(0)).with_input(
             input,
             ResolvedInput {
-                output: tx.outputs[0].clone(),
+                output: tx.core.outputs[0].clone(),
                 created_height: Some(0),
             },
         );
@@ -650,6 +763,8 @@ mod tests {
             tx,
             input_index: 0,
             current_height: Some(0),
+            chain_id: 0,
+            script_hash,
         };
 
         let engine = DeterministicScriptEngine::with_config(VmConfig {
