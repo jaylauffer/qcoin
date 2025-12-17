@@ -125,7 +125,7 @@ fn compute_state_root(
 
     for tx in txs {
         ledger
-            .apply_transaction(tx, &script_engine, height)
+            .apply_transaction(tx, &script_engine, height, chain.chain_id)
             .map_err(|err| ConsensusError::LedgerError(err.to_string()))?;
     }
 

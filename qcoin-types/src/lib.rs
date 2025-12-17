@@ -27,15 +27,27 @@ pub enum AssetKind {
     SemiFungible,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AssetId(pub Hash256);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetDefinition {
-    pub asset_id: AssetId,
-    pub kind: AssetKind,
     pub issuer_script_hash: Hash256,
     pub metadata_root: Hash256,
+    pub max_supply: Option<u128>,
+    pub decimals: u8,
+    pub kind: AssetKind,
+}
+
+pub fn derive_asset_id(definition: &AssetDefinition, chain_id: u32) -> AssetId {
+    let mut preimage = Vec::new();
+    const DOMAIN_SEPARATOR: &[u8] = b"QCOIN_ASSET_ID_V1";
+
+    preimage.extend_from_slice(DOMAIN_SEPARATOR);
+    preimage.extend_from_slice(&chain_id.to_le_bytes());
+    preimage.extend(consensus_codec::encode_asset_definition(definition));
+
+    AssetId(*blake3::hash(&preimage).as_bytes())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,7 +72,10 @@ pub struct TransactionInput {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransactionKind {
     Transfer,
-    CreateAsset,
+    CreateAsset {
+        definition: AssetDefinition,
+        initial_supply: u128,
+    },
     // later: MintAsset, BurnAsset, etc.
 }
 
@@ -124,31 +139,28 @@ pub fn create_asset_transaction(
     issuer_script_hash: Hash256,
     kind: AssetKind,
     metadata_root: Hash256,
+    max_supply: Option<u128>,
+    decimals: u8,
     initial_supply: u128,
     destination_script_hash: Hash256,
+    chain_id: u32,
 ) -> (AssetDefinition, Transaction) {
-    let kind_byte = match kind {
-        AssetKind::Fungible => 0u8,
-        AssetKind::NonFungible => 1u8,
-        AssetKind::SemiFungible => 2u8,
-    };
-
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&issuer_script_hash);
-    hasher.update(&[kind_byte]);
-    hasher.update(&metadata_root);
-    let asset_id = AssetId(*hasher.finalize().as_bytes());
-
     let definition = AssetDefinition {
-        asset_id: asset_id.clone(),
-        kind,
         issuer_script_hash,
         metadata_root,
+        max_supply,
+        decimals,
+        kind,
     };
+
+    let asset_id = derive_asset_id(&definition, chain_id);
 
     let transaction = Transaction {
         core: TransactionCore {
-            kind: TransactionKind::CreateAsset,
+            kind: TransactionKind::CreateAsset {
+                definition: definition.clone(),
+                initial_supply,
+            },
             inputs: vec![],
             outputs: vec![Output {
                 owner_script_hash: destination_script_hash,
@@ -166,7 +178,10 @@ pub fn create_asset_transaction(
 }
 
 pub mod consensus_codec {
-    use super::{AssetAmount, BlockHeader, Hash256, Output, TransactionCore, TransactionInput};
+    use super::{
+        AssetAmount, AssetDefinition, AssetKind, BlockHeader, Hash256, Output, TransactionCore,
+        TransactionInput, TransactionKind,
+    };
 
     fn encode_len(len: usize, out: &mut Vec<u8>) {
         let len: u32 = len
@@ -187,6 +202,30 @@ pub mod consensus_codec {
     fn encode_asset_amount(asset: &AssetAmount, out: &mut Vec<u8>) {
         encode_hash(&asset.asset_id.0, out);
         out.extend_from_slice(&asset.amount.to_le_bytes());
+    }
+
+    pub fn encode_asset_definition(definition: &AssetDefinition) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_asset_definition_into(definition, &mut out);
+        out
+    }
+
+    fn encode_asset_definition_into(definition: &AssetDefinition, out: &mut Vec<u8>) {
+        encode_hash(&definition.issuer_script_hash, out);
+        out.push(match definition.kind {
+            AssetKind::Fungible => 0,
+            AssetKind::NonFungible => 1,
+            AssetKind::SemiFungible => 2,
+        });
+        encode_hash(&definition.metadata_root, out);
+        match definition.max_supply {
+            Some(max) => {
+                out.push(1);
+                out.extend_from_slice(&max.to_le_bytes());
+            }
+            None => out.push(0),
+        }
+        out.push(definition.decimals);
     }
 
     pub fn encode_output(output: &Output) -> Vec<u8> {
@@ -219,8 +258,8 @@ pub mod consensus_codec {
 
     pub fn encode_tx_core_into(core: &TransactionCore, out: &mut Vec<u8>) {
         out.push(match core.kind {
-            super::TransactionKind::Transfer => 0,
-            super::TransactionKind::CreateAsset => 1,
+            TransactionKind::Transfer => 0,
+            TransactionKind::CreateAsset { .. } => 1,
         });
 
         encode_len(core.inputs.len(), out);
@@ -231,6 +270,15 @@ pub mod consensus_codec {
         encode_len(core.outputs.len(), out);
         for output in &core.outputs {
             encode_output_into(output, out);
+        }
+
+        if let TransactionKind::CreateAsset {
+            definition,
+            initial_supply,
+        } = &core.kind
+        {
+            encode_asset_definition_into(definition, out);
+            out.extend_from_slice(&initial_supply.to_le_bytes());
         }
     }
 
@@ -291,29 +339,32 @@ mod tests {
         let metadata_root = [9u8; 32];
         let destination_script_hash = [8u8; 32];
         let initial_supply = 500;
+        let chain_id = 42;
         let (definition, transaction) = create_asset_transaction(
             issuer_script_hash,
             AssetKind::SemiFungible,
             metadata_root,
+            Some(1_000),
+            2,
             initial_supply,
             destination_script_hash,
+            chain_id,
         );
 
-        assert_eq!(transaction.core.kind, TransactionKind::CreateAsset);
+        let asset_id = derive_asset_id(&definition, chain_id);
+
+        assert!(matches!(
+            transaction.core.kind,
+            TransactionKind::CreateAsset { .. }
+        ));
         assert!(transaction.core.inputs.is_empty());
         assert_eq!(transaction.core.outputs.len(), 1);
 
-        let expected_kind_byte = 2u8;
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&issuer_script_hash);
-        hasher.update(&[expected_kind_byte]);
-        hasher.update(&metadata_root);
-        let expected_asset_id = AssetId(*hasher.finalize().as_bytes());
-
-        assert_eq!(definition.asset_id, expected_asset_id);
         assert_eq!(definition.kind, AssetKind::SemiFungible);
         assert_eq!(definition.issuer_script_hash, issuer_script_hash);
         assert_eq!(definition.metadata_root, metadata_root);
+        assert_eq!(definition.max_supply, Some(1_000));
+        assert_eq!(definition.decimals, 2);
 
         let minted_output = transaction
             .core
@@ -326,7 +377,7 @@ mod tests {
             .assets
             .first()
             .expect("minted asset amount should be present");
-        assert_eq!(minted_asset.asset_id, expected_asset_id);
+        assert_eq!(minted_asset.asset_id, asset_id);
         assert_eq!(minted_asset.amount, initial_supply);
         assert!(minted_output.metadata_hash.is_none());
     }
