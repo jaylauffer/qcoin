@@ -3,7 +3,10 @@ use std::collections::{HashMap, HashSet};
 use qcoin_script::{
     consensus_codec as script_codec, ResolvedInput, Script, ScriptContext, ScriptEngine, ScriptHost,
 };
-use qcoin_types::{consensus_codec, AssetAmount, AssetId, Block, Hash256, Output, Transaction};
+use qcoin_types::{
+    consensus_codec, derive_asset_id, AssetAmount, AssetDefinition, AssetId, Block, Hash256,
+    Output, Transaction, TransactionKind,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -24,6 +27,7 @@ pub type UtxoSet = HashMap<UtxoKey, TrackedOutput>;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LedgerState {
     pub utxos: UtxoSet,
+    pub assets: HashMap<AssetId, AssetDefinition>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -33,6 +37,7 @@ pub struct ChainState {
     pub tip_hash: Hash256,
     pub state_root: Hash256,
     pub last_timestamp: u64,
+    pub chain_id: u32,
 }
 
 #[derive(Debug, Error)]
@@ -53,6 +58,12 @@ pub enum LedgerError {
     ScriptFailed,
     #[error("asset conservation violated")]
     AssetConservationViolation,
+    #[error("asset already exists")]
+    AssetAlreadyExists,
+    #[error("missing issuer authorization for asset creation")]
+    MissingIssuerAuthorization,
+    #[error("asset supply exceeds declared maximum")]
+    MaxSupplyExceeded,
     #[error("other ledger error: {0}")]
     Other(String),
 }
@@ -116,6 +127,16 @@ impl LedgerState {
             hasher.update(&encoded);
         }
 
+        let mut assets: Vec<_> = self.assets.iter().collect();
+        assets.sort_by(|(a, _), (b, _)| a.0.cmp(&b.0));
+
+        for (asset_id, definition) in assets {
+            let mut encoded = Vec::new();
+            encoded.extend_from_slice(&asset_id.0);
+            encoded.extend(consensus_codec::encode_asset_definition(definition));
+            hasher.update(&encoded);
+        }
+
         *hasher.finalize().as_bytes()
     }
 
@@ -124,12 +145,28 @@ impl LedgerState {
         tx: &Transaction,
         engine: &E,
         current_height: u64,
+        chain_id: u32,
     ) -> Result<(), LedgerError> {
         let mut seen_inputs = HashSet::new();
         let mut consumed_utxos = Vec::new();
         let mut input_totals: HashMap<Hash256, u128> = HashMap::new();
         let mut output_totals: HashMap<Hash256, u128> = HashMap::new();
         let host = LedgerScriptHost::new(&self.utxos, current_height);
+        let mut issuer_authorized = false;
+        let mut created_asset: Option<(AssetId, AssetDefinition, u128)> = None;
+
+        if let TransactionKind::CreateAsset {
+            definition,
+            initial_supply,
+        } = &tx.core.kind
+        {
+            let asset_id = derive_asset_id(definition, chain_id);
+            if self.assets.contains_key(&asset_id) {
+                return Err(LedgerError::AssetAlreadyExists);
+            }
+
+            created_asset = Some((asset_id, definition.clone(), *initial_supply));
+        }
 
         for (input_index, input) in tx.core.inputs.iter().enumerate() {
             let key = UtxoKey {
@@ -151,7 +188,7 @@ impl LedgerState {
                 tx: tx.clone(),
                 input_index,
                 current_height: Some(current_height),
-                chain_id: 0,
+                chain_id,
                 script_hash: referenced_output.output.owner_script_hash,
             };
 
@@ -169,6 +206,21 @@ impl LedgerState {
 
             if script_hash != referenced_output.output.owner_script_hash {
                 return Err(LedgerError::ScriptHashMismatch);
+            }
+
+            if let Some((asset_id, definition, _)) = &created_asset {
+                if referenced_output.output.owner_script_hash == definition.issuer_script_hash {
+                    issuer_authorized = true;
+                }
+
+                if referenced_output
+                    .output
+                    .assets
+                    .iter()
+                    .any(|asset| asset.asset_id == *asset_id)
+                {
+                    issuer_authorized = true;
+                }
             }
 
             match (
@@ -196,13 +248,31 @@ impl LedgerState {
             }
         }
 
-        if matches!(tx.core.kind, qcoin_types::TransactionKind::CreateAsset) {
-            for asset in output_totals.iter().map(|(asset_id, amount)| AssetAmount {
-                asset_id: AssetId(*asset_id),
-                amount: *amount,
-            }) {
-                accumulate_asset(&mut input_totals, &asset);
+        if let Some((asset_id, definition, initial_supply)) = created_asset {
+            let minted_amount = output_totals.get(&asset_id.0).copied().unwrap_or_default();
+
+            if minted_amount != initial_supply {
+                return Err(LedgerError::AssetConservationViolation);
             }
+
+            if let Some(max) = definition.max_supply {
+                if minted_amount > max {
+                    return Err(LedgerError::MaxSupplyExceeded);
+                }
+            }
+
+            if input_totals.get(&asset_id.0).copied().unwrap_or_default() != 0 {
+                return Err(LedgerError::AssetConservationViolation);
+            }
+
+            if !issuer_authorized {
+                return Err(LedgerError::MissingIssuerAuthorization);
+            }
+
+            output_totals.remove(&asset_id.0);
+            input_totals.remove(&asset_id.0);
+
+            self.assets.insert(asset_id, definition);
         }
 
         for (asset_id, input_amount) in input_totals.iter() {
@@ -254,7 +324,7 @@ impl ChainState {
     ) -> Result<(), LedgerError> {
         for tx in &block.transactions {
             self.ledger
-                .apply_transaction(tx, engine, block.header.height)?;
+                .apply_transaction(tx, engine, block.header.height, self.chain_id)?;
         }
 
         self.height = block.header.height;
@@ -274,9 +344,11 @@ mod tests {
     use qcoin_crypto::{PublicKey, Signature, SignatureSchemeId};
     use qcoin_script::{DeterministicScriptEngine, OpCode, Script};
     use qcoin_types::{
-        create_asset_transaction, AssetId, AssetKind, Block, BlockHeader, TransactionCore,
-        TransactionInput, TransactionKind, TransactionWitness,
+        create_asset_transaction, derive_asset_id, AssetId, AssetKind, Block, BlockHeader,
+        TransactionCore, TransactionInput, TransactionKind, TransactionWitness,
     };
+
+    const TEST_CHAIN_ID: u32 = 0;
 
     fn simple_script() -> Script {
         Script(vec![OpCode::Nop])
@@ -324,26 +396,81 @@ mod tests {
         }
     }
 
+    fn insert_issuer_utxo(ledger: &mut LedgerState, script: &Script, key: UtxoKey) {
+        ledger.utxos.insert(
+            key,
+            TrackedOutput {
+                output: Output {
+                    owner_script_hash: script_hash(script),
+                    assets: vec![],
+                    metadata_hash: None,
+                },
+                created_height: 0,
+            },
+        );
+    }
+
+    fn build_create_asset_transaction(
+        issuer_script: &Script,
+        destination_script_hash: Hash256,
+        metadata_root: Hash256,
+        initial_supply: u128,
+        max_supply: Option<u128>,
+        decimals: u8,
+        chain_id: u32,
+        issuer_key: UtxoKey,
+    ) -> (AssetDefinition, Transaction) {
+        let issuer_script_hash = script_hash(issuer_script);
+        let (definition, mut tx) = create_asset_transaction(
+            issuer_script_hash,
+            AssetKind::Fungible,
+            metadata_root,
+            max_supply,
+            decimals,
+            initial_supply,
+            destination_script_hash,
+            chain_id,
+        );
+
+        tx.core.inputs.push(TransactionInput {
+            tx_id: issuer_key.tx_id,
+            index: issuer_key.index,
+        });
+        tx.witness.inputs.push(build_witness(issuer_script, None));
+
+        (definition, tx)
+    }
+
     #[test]
     fn create_asset_transaction_mints_supply_and_is_spendable() {
         let mut ledger = LedgerState::default();
         let asset_script = simple_script();
         let destination_script_hash = script_hash(&asset_script);
-        let issuer_script_hash = [21u8; 32];
         let metadata_root = [22u8; 32];
         let initial_supply = 75;
+        let chain_id = 0;
 
-        let (definition, create_tx) = create_asset_transaction(
-            issuer_script_hash,
-            AssetKind::Fungible,
+        let issuer_script = simple_script();
+        let issuer_utxo_key = UtxoKey {
+            tx_id: [1u8; 32],
+            index: 0,
+        };
+        insert_issuer_utxo(&mut ledger, &issuer_script, issuer_utxo_key.clone());
+
+        let (definition, create_tx) = build_create_asset_transaction(
+            &issuer_script,
+            destination_script_hash,
             metadata_root,
             initial_supply,
-            destination_script_hash,
+            Some(1000),
+            2,
+            chain_id,
+            issuer_utxo_key,
         );
 
         let engine = DeterministicScriptEngine::default();
         ledger
-            .apply_transaction(&create_tx, &engine, 0)
+            .apply_transaction(&create_tx, &engine, 0, chain_id)
             .expect("asset creation should succeed");
 
         let minted_utxo_key = UtxoKey {
@@ -360,7 +487,8 @@ mod tests {
         );
         assert_eq!(minted_output.output.assets.len(), 1);
         let minted_asset = &minted_output.output.assets[0];
-        assert_eq!(minted_asset.asset_id, definition.asset_id);
+        let derived_id = derive_asset_id(&definition, chain_id);
+        assert_eq!(minted_asset.asset_id, derived_id);
         assert_eq!(minted_asset.amount, initial_supply);
 
         let spend_tx = Transaction {
@@ -382,7 +510,7 @@ mod tests {
         };
 
         ledger
-            .apply_transaction(&spend_tx, &engine, 1)
+            .apply_transaction(&spend_tx, &engine, 1, chain_id)
             .expect("spend transaction should succeed");
 
         assert!(!ledger.utxos.contains_key(&minted_utxo_key));
@@ -391,6 +519,217 @@ mod tests {
             index: 0,
         };
         assert!(ledger.utxos.contains_key(&new_utxo_key));
+    }
+
+    #[test]
+    fn create_asset_rejects_wrong_asset_id() {
+        let mut ledger = LedgerState::default();
+        let issuer_script = simple_script();
+        let destination_script_hash = script_hash(&simple_script());
+        let metadata_root = [1u8; 32];
+        let issuer_utxo_key = UtxoKey {
+            tx_id: [2u8; 32],
+            index: 0,
+        };
+        insert_issuer_utxo(&mut ledger, &issuer_script, issuer_utxo_key.clone());
+
+        let (definition, mut create_tx) = build_create_asset_transaction(
+            &issuer_script,
+            destination_script_hash,
+            metadata_root,
+            10,
+            Some(100),
+            0,
+            TEST_CHAIN_ID,
+            issuer_utxo_key,
+        );
+
+        create_tx.core.outputs[0].assets[0].asset_id = AssetId([9u8; 32]);
+
+        let engine = DeterministicScriptEngine::default();
+        let result = ledger.apply_transaction(&create_tx, &engine, 0, TEST_CHAIN_ID);
+
+        assert!(matches!(
+            result,
+            Err(LedgerError::AssetConservationViolation)
+        ));
+        assert!(!ledger
+            .assets
+            .contains_key(&derive_asset_id(&definition, TEST_CHAIN_ID)));
+    }
+
+    #[test]
+    fn create_asset_rejects_initial_supply_mismatch() {
+        let mut ledger = LedgerState::default();
+        let issuer_script = simple_script();
+        let destination_script_hash = script_hash(&simple_script());
+        let metadata_root = [3u8; 32];
+        let issuer_utxo_key = UtxoKey {
+            tx_id: [4u8; 32],
+            index: 0,
+        };
+        insert_issuer_utxo(&mut ledger, &issuer_script, issuer_utxo_key.clone());
+
+        let (_, mut create_tx) = build_create_asset_transaction(
+            &issuer_script,
+            destination_script_hash,
+            metadata_root,
+            10,
+            None,
+            0,
+            TEST_CHAIN_ID,
+            issuer_utxo_key,
+        );
+
+        create_tx.core.outputs[0].assets[0].amount = 5;
+
+        let engine = DeterministicScriptEngine::default();
+        let result = ledger.apply_transaction(&create_tx, &engine, 0, TEST_CHAIN_ID);
+
+        assert!(matches!(
+            result,
+            Err(LedgerError::AssetConservationViolation)
+        ));
+    }
+
+    #[test]
+    fn create_asset_rejects_additional_asset_minting() {
+        let mut ledger = LedgerState::default();
+        let issuer_script = simple_script();
+        let destination_script_hash = script_hash(&simple_script());
+        let metadata_root = [5u8; 32];
+        let issuer_utxo_key = UtxoKey {
+            tx_id: [6u8; 32],
+            index: 0,
+        };
+        insert_issuer_utxo(&mut ledger, &issuer_script, issuer_utxo_key.clone());
+
+        let (_, mut create_tx) = build_create_asset_transaction(
+            &issuer_script,
+            destination_script_hash,
+            metadata_root,
+            10,
+            None,
+            0,
+            TEST_CHAIN_ID,
+            issuer_utxo_key,
+        );
+
+        create_tx.core.outputs.push(Output {
+            owner_script_hash: destination_script_hash,
+            assets: vec![AssetAmount {
+                asset_id: AssetId([7u8; 32]),
+                amount: 1,
+            }],
+            metadata_hash: None,
+        });
+
+        let engine = DeterministicScriptEngine::default();
+        let result = ledger.apply_transaction(&create_tx, &engine, 0, TEST_CHAIN_ID);
+
+        assert!(matches!(
+            result,
+            Err(LedgerError::AssetConservationViolation)
+        ));
+    }
+
+    #[test]
+    fn create_asset_rejects_duplicate_definition() {
+        let mut ledger = LedgerState::default();
+        let issuer_script = simple_script();
+        let destination_script_hash = script_hash(&simple_script());
+        let metadata_root = [8u8; 32];
+        let issuer_utxo_key = UtxoKey {
+            tx_id: [9u8; 32],
+            index: 0,
+        };
+        insert_issuer_utxo(&mut ledger, &issuer_script, issuer_utxo_key.clone());
+
+        let (definition, create_tx) = build_create_asset_transaction(
+            &issuer_script,
+            destination_script_hash,
+            metadata_root,
+            10,
+            None,
+            0,
+            TEST_CHAIN_ID,
+            issuer_utxo_key,
+        );
+
+        let engine = DeterministicScriptEngine::default();
+        ledger
+            .apply_transaction(&create_tx, &engine, 0, TEST_CHAIN_ID)
+            .expect("first asset creation should succeed");
+
+        let mut second_tx = create_tx.clone();
+        second_tx.core.inputs.clear();
+        second_tx.witness.inputs.clear();
+
+        let result = ledger.apply_transaction(&second_tx, &engine, 0, TEST_CHAIN_ID);
+
+        assert!(matches!(result, Err(LedgerError::AssetAlreadyExists)));
+        assert!(ledger
+            .assets
+            .contains_key(&derive_asset_id(&definition, TEST_CHAIN_ID)));
+    }
+
+    #[test]
+    fn create_asset_rejects_supply_over_maximum() {
+        let mut ledger = LedgerState::default();
+        let issuer_script = simple_script();
+        let destination_script_hash = script_hash(&simple_script());
+        let metadata_root = [10u8; 32];
+        let issuer_utxo_key = UtxoKey {
+            tx_id: [11u8; 32],
+            index: 0,
+        };
+        insert_issuer_utxo(&mut ledger, &issuer_script, issuer_utxo_key.clone());
+
+        let (_, create_tx) = build_create_asset_transaction(
+            &issuer_script,
+            destination_script_hash,
+            metadata_root,
+            20,
+            Some(10),
+            0,
+            TEST_CHAIN_ID,
+            issuer_utxo_key,
+        );
+
+        let engine = DeterministicScriptEngine::default();
+        let result = ledger.apply_transaction(&create_tx, &engine, 0, TEST_CHAIN_ID);
+
+        assert!(matches!(result, Err(LedgerError::MaxSupplyExceeded)));
+    }
+
+    #[test]
+    fn create_asset_requires_issuer_authorization() {
+        let mut ledger = LedgerState::default();
+        let destination_script_hash = script_hash(&simple_script());
+        let metadata_root = [12u8; 32];
+        let issuer_script_hash = [13u8; 32];
+
+        let (definition, create_tx) = create_asset_transaction(
+            issuer_script_hash,
+            AssetKind::Fungible,
+            metadata_root,
+            Some(1000),
+            0,
+            5,
+            destination_script_hash,
+            TEST_CHAIN_ID,
+        );
+
+        let engine = DeterministicScriptEngine::default();
+        let result = ledger.apply_transaction(&create_tx, &engine, 0, TEST_CHAIN_ID);
+
+        assert!(matches!(
+            result,
+            Err(LedgerError::MissingIssuerAuthorization)
+        ));
+        assert!(!ledger
+            .assets
+            .contains_key(&derive_asset_id(&definition, TEST_CHAIN_ID)));
     }
 
     #[test]
@@ -409,7 +748,7 @@ mod tests {
         };
 
         let engine = DeterministicScriptEngine::default();
-        let result = ledger.apply_transaction(&tx, &engine, 0);
+        let result = ledger.apply_transaction(&tx, &engine, 0, TEST_CHAIN_ID);
 
         assert!(matches!(result, Err(LedgerError::MissingInput)));
     }
@@ -446,7 +785,7 @@ mod tests {
         };
 
         let engine = DeterministicScriptEngine::default();
-        let result = ledger.apply_transaction(&spending_tx, &engine, 0);
+        let result = ledger.apply_transaction(&spending_tx, &engine, 0, TEST_CHAIN_ID);
 
         assert!(matches!(
             result,
@@ -488,7 +827,7 @@ mod tests {
         };
 
         let engine = DeterministicScriptEngine::default();
-        let result = ledger.apply_transaction(&tx, &engine, 0);
+        let result = ledger.apply_transaction(&tx, &engine, 0, TEST_CHAIN_ID);
 
         assert!(matches!(result, Err(LedgerError::DoubleSpend)));
         assert!(ledger.utxos.contains_key(&utxo_key));
@@ -521,7 +860,7 @@ mod tests {
         };
 
         let engine = DeterministicScriptEngine::default();
-        let result = ledger.apply_transaction(&tx, &engine, 0);
+        let result = ledger.apply_transaction(&tx, &engine, 0, TEST_CHAIN_ID);
 
         assert!(matches!(result, Err(LedgerError::ScriptHashMismatch)));
         assert!(ledger.utxos.contains_key(&utxo_key));
@@ -556,7 +895,7 @@ mod tests {
         };
 
         let engine = DeterministicScriptEngine::default();
-        let result = ledger.apply_transaction(&tx, &engine, 0);
+        let result = ledger.apply_transaction(&tx, &engine, 0, TEST_CHAIN_ID);
 
         assert!(matches!(result, Err(LedgerError::MetadataHashMismatch)));
         assert!(ledger.utxos.contains_key(&utxo_key));
@@ -592,7 +931,7 @@ mod tests {
 
         let engine = DeterministicScriptEngine::default();
         ledger
-            .apply_transaction(&tx, &engine, 0)
+            .apply_transaction(&tx, &engine, 0, TEST_CHAIN_ID)
             .expect("transaction should succeed");
 
         assert!(!ledger.utxos.contains_key(&utxo_key));
