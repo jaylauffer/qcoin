@@ -21,6 +21,8 @@ cargo run -p qcoin-node -- run
 cargo run -p qcoin-node -- keygen
 ```
 
+QCoin currently uses **loadngo** for peer-to-peer discovery and node connectivity.
+
 ## Roadmap
 
 - Replace dummy crypto with real post-quantum schemes.
