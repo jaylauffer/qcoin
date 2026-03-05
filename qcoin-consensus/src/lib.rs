@@ -88,6 +88,32 @@ impl DummyConsensusEngine {
         engine
     }
 
+    pub fn from_keys(
+        registry: InMemoryRegistry,
+        public_key: PublicKey,
+        signing_key: PrivateKey,
+        validators: Vec<PublicKey>,
+    ) -> Result<Self, ConsensusError> {
+        if public_key.scheme != signing_key.scheme {
+            return Err(ConsensusError::Other(
+                "public/private key scheme mismatch".to_string(),
+            ));
+        }
+
+        let mut effective_validators = validators;
+        if effective_validators.is_empty() {
+            effective_validators.push(public_key.clone());
+        }
+
+        Ok(Self {
+            registry,
+            signing_scheme: public_key.scheme,
+            signing_key,
+            public_key,
+            validators: effective_validators,
+        })
+    }
+
     fn scheme(&self, id: &SignatureSchemeId) -> Option<&dyn PqSignatureScheme> {
         self.registry.get(id)
     }

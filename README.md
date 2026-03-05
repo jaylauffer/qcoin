@@ -21,7 +21,56 @@ cargo run -p qcoin-node -- run
 cargo run -p qcoin-node -- keygen
 ```
 
-QCoin currently uses **loadngo** for peer-to-peer discovery and node connectivity.
+Runtime artifacts are written under `data/` by default (`data/qcoin-chain-state.json` and matching `*.blocks.json`), and are git-ignored.
+
+## Node communication (HTTP + pull sync)
+
+`qcoin-node` now supports static peers and block synchronization over HTTP:
+
+- `GET /tip` -> current tip metadata (`height`, `tip_hash_hex`, `state_root_hex`)
+- `GET /blocks/{height}` -> binary (`bincode`) encoded block for 1-based height
+- `POST /blocks` -> submit binary (`bincode`) encoded block
+
+### Quick 2-node local test
+
+1. Generate validator keypair:
+
+```bash
+cargo run -p qcoin-node -- keygen > /tmp/qcoin_validator.json
+PUB=$(grep -o '"public_key_hex\": \"[^\"]*\"' /tmp/qcoin_validator.json | cut -d'\"' -f4)
+```
+
+2. Start node A (producer + API):
+
+```bash
+cargo run -p qcoin-node -- run \
+  --listen 127.0.0.1:9710 \
+  --interval-seconds 1 \
+  --keypair-json /tmp/qcoin_validator.json \
+  --validator-public-key-hex "$PUB"
+```
+
+3. Sync node B from node A:
+
+```bash
+cargo run -p qcoin-node -- run \
+  --once \
+  --produce=false \
+  --peer http://127.0.0.1:9710 \
+  --validator-public-key-hex "$PUB" \
+  --state-path data/qcoin_b_state.json \
+  --blocks-path data/qcoin_b_blocks.json
+```
+
+### Run flags (selected)
+
+- `--peer <url>` repeatable static peer list (example: `http://127.0.0.1:9710`)
+- `--listen <addr>` HTTP bind address
+- `--sync-interval-seconds <n>` periodic pull-sync interval
+- `--produce=<true|false>` whether this node proposes local empty blocks
+- `--validator-public-key-hex <hex>` validator set entries for signature/proposer checks
+- `--keypair-json <path>` signer keypair file from `keygen`
+- `--blocks-path <path>` explicit block history persistence path
 
 ## Roadmap
 
