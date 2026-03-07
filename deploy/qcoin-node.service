@@ -1,0 +1,22 @@
+[Unit]
+Description=QCoin node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jay
+Group=jay
+EnvironmentFile=/etc/qcoin/qcoin-node.env
+ExecStart=/usr/local/bin/qcoin-node-launch.sh
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/qcoin /var/log/qcoin
+StandardOutput=append:/var/log/qcoin/node.log
+StandardError=append:/var/log/qcoin/node.err
+
+[Install]
+WantedBy=multi-user.target
