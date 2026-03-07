@@ -68,9 +68,138 @@ cargo run -p qcoin-node -- run \
 - `--listen <addr>` HTTP bind address
 - `--sync-interval-seconds <n>` periodic pull-sync interval
 - `--produce=<true|false>` whether this node proposes local empty blocks
+- `--network-config-json <path>` JSON file containing peer URLs and validator public keys
 - `--validator-public-key-hex <hex>` validator set entries for signature/proposer checks
 - `--keypair-json <path>` signer keypair file from `keygen`
 - `--blocks-path <path>` explicit block history persistence path
+
+## Manual systemd deployment
+
+The repo contains deploy artifacts for running `qcoin-node` as a boot-time service:
+
+- `deploy/qcoin-node.service`
+- `deploy/qcoin-node-launch.sh`
+- `deploy/qcoin-node.env.example`
+- `deploy/network-config.10.10.10.1.example.json`
+
+The recommended layout on a machine is:
+
+- `/etc/systemd/system/qcoin-node.service`
+- `/usr/local/bin/qcoin-node-launch.sh`
+- `/etc/qcoin/qcoin-node.env`
+- `/etc/qcoin/network-config.json`
+- `/etc/qcoin/node-keypair.json`
+- `/var/lib/qcoin/` for chain state and blocks
+- `/var/log/qcoin/` for service logs
+
+### 1. Build the release binary
+
+```bash
+cargo build --release -p qcoin-node
+```
+
+Expected binary path:
+
+```bash
+/home/jay/pudding/qcoin/target/release/qcoin-node
+```
+
+### 2. Install the service and launcher
+
+```bash
+sudo install -d -m 0755 /etc/qcoin /var/lib/qcoin /var/log/qcoin
+sudo install -m 0755 deploy/qcoin-node-launch.sh /usr/local/bin/qcoin-node-launch.sh
+sudo install -m 0644 deploy/qcoin-node.service /etc/systemd/system/qcoin-node.service
+```
+
+### 3. Create the node keypair JSON
+
+Generate one keypair per machine:
+
+```bash
+./target/release/qcoin-node keygen > /tmp/node-keypair.json
+sudo install -m 0600 /tmp/node-keypair.json /etc/qcoin/node-keypair.json
+```
+
+Capture the `public_key_hex` from each machine. All nodes must use the same validator set.
+
+### 4. Create `/etc/qcoin/network-config.json`
+
+This file is the source of truth for peers and validator public keys.
+
+Example for machine `10.10.10.1`:
+
+```json
+{
+  "peers": [
+    "http://10.10.10.2:9700",
+    "http://10.10.10.3:9700"
+  ],
+  "validator_public_key_hex": [
+    "PUBKEY_FOR_10_10_10_1",
+    "PUBKEY_FOR_10_10_10_2",
+    "PUBKEY_FOR_10_10_10_3"
+  ]
+}
+```
+
+Install it:
+
+```bash
+sudo install -m 0644 deploy/network-config.10.10.10.1.example.json /etc/qcoin/network-config.json
+```
+
+Then edit `/etc/qcoin/network-config.json` and replace the placeholder validator keys with the real `public_key_hex` values.
+
+### 5. Create `/etc/qcoin/qcoin-node.env`
+
+Example for machine `10.10.10.1`:
+
+```bash
+QCOIN_BINARY=/home/jay/pudding/qcoin/target/release/qcoin-node
+QCOIN_WORKDIR=/home/jay/pudding/qcoin
+QCOIN_STATE_PATH=/var/lib/qcoin/qcoin-chain-state.json
+QCOIN_BLOCKS_PATH=/var/lib/qcoin/qcoin-blocks.json
+QCOIN_LISTEN=10.10.10.1:9700
+QCOIN_INTERVAL_SECONDS=5
+QCOIN_SYNC_INTERVAL_SECONDS=3
+QCOIN_PRODUCE=true
+QCOIN_SCHEME=dilithium2
+QCOIN_KEYPAIR_JSON=/etc/qcoin/node-keypair.json
+QCOIN_NETWORK_CONFIG_JSON=/etc/qcoin/network-config.json
+```
+
+You can start from the template:
+
+```bash
+sudo install -m 0644 deploy/qcoin-node.env.example /etc/qcoin/qcoin-node.env
+```
+
+Then edit `/etc/qcoin/qcoin-node.env` for the local machine.
+
+### 6. Reload and start the service
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now qcoin-node.service
+```
+
+### 7. Inspect logs and status
+
+```bash
+systemctl --no-pager --full status qcoin-node.service
+journalctl -u qcoin-node.service -f
+tail -f /var/log/qcoin/node.log
+tail -f /var/log/qcoin/node.err
+```
+
+### 8. Multi-node requirements
+
+- Each machine needs its own `/etc/qcoin/node-keypair.json`.
+- Each machine should have a machine-specific `/etc/qcoin/qcoin-node.env` with its own `QCOIN_LISTEN`.
+- Each machine should have a machine-specific `/etc/qcoin/network-config.json` with its peers listed appropriately.
+- The `validator_public_key_hex` array must be identical across all three machines.
+- Peer URLs should point at reachable private addresses such as `http://10.10.10.x:9700`.
 
 ## Roadmap
 

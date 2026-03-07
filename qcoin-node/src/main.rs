@@ -46,6 +46,8 @@ enum Commands {
         #[arg(long)]
         keypair_json: Option<PathBuf>,
         #[arg(long)]
+        network_config_json: Option<PathBuf>,
+        #[arg(long)]
         validator_public_key_hex: Vec<String>,
     },
     /// Generate a new PQ keypair using the dummy scheme
@@ -75,6 +77,14 @@ struct KeypairOutput {
     scheme: String,
     public_key_hex: String,
     private_key_hex: String,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct NetworkConfig {
+    #[serde(default)]
+    peers: Vec<String>,
+    #[serde(default)]
+    validator_public_key_hex: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -116,6 +126,7 @@ fn main() {
             produce,
             scheme,
             keypair_json,
+            network_config_json,
             validator_public_key_hex,
         } => run_node(
             interval_seconds,
@@ -128,6 +139,7 @@ fn main() {
             produce,
             scheme,
             keypair_json,
+            network_config_json,
             validator_public_key_hex,
         ),
         Commands::Keygen { scheme } => generate_keypair(scheme),
@@ -146,6 +158,7 @@ fn run_node(
     produce: bool,
     scheme: SchemeArg,
     keypair_json: Option<PathBuf>,
+    network_config_json: Option<PathBuf>,
     validator_public_key_hex: Vec<String>,
 ) {
     let blocks_path = blocks_path.unwrap_or_else(|| blocks_path_from_state_path(&state_path));
@@ -189,6 +202,23 @@ fn run_node(
             }
         }
     };
+
+    let network_config = match network_config_json {
+        Some(path) => match load_network_config(&path) {
+            Ok(config) => config,
+            Err(err) => {
+                eprintln!("Failed to load network config {}: {err}", path.display());
+                return;
+            }
+        },
+        None => NetworkConfig::default(),
+    };
+
+    let peers = merge_unique_strings(network_config.peers, peers);
+    let validator_public_key_hex = merge_unique_strings(
+        network_config.validator_public_key_hex,
+        validator_public_key_hex,
+    );
 
     let validators = match parse_validators(&validator_public_key_hex, scheme_id) {
         Ok(mut vals) => {
@@ -493,6 +523,25 @@ fn load_keypair_from_json(
         .map_err(|err| err.to_string())?;
 
     Ok((public_key, private_key))
+}
+
+fn load_network_config(path: &Path) -> Result<NetworkConfig, String> {
+    let text = fs::read_to_string(path).map_err(|err| err.to_string())?;
+    serde_json::from_str(&text).map_err(|err| err.to_string())
+}
+
+fn merge_unique_strings(primary: Vec<String>, extra: Vec<String>) -> Vec<String> {
+    let mut merged = Vec::new();
+    for value in primary.into_iter().chain(extra.into_iter()) {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !merged.iter().any(|existing: &String| existing == trimmed) {
+            merged.push(trimmed.to_string());
+        }
+    }
+    merged
 }
 
 fn default_chain_state() -> ChainState {
