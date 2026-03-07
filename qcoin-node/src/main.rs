@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -219,7 +219,11 @@ fn run_node(
         None => NetworkConfig::default(),
     };
 
-    let peers = merge_unique_strings(network_config.peers, peers);
+    let self_peer_url = format!("http://{}", listen_addr.trim_end_matches('/'));
+    let peers = merge_unique_strings(network_config.peers, peers)
+        .into_iter()
+        .filter(|peer| !same_peer_endpoint(peer, &self_peer_url))
+        .collect::<Vec<_>>();
     let validator_public_key_hex = merge_unique_strings(
         network_config.validator_public_key_hex,
         validator_public_key_hex,
@@ -251,21 +255,23 @@ fn run_node(
     println!("Node state path: {}", state_path.display());
     println!("Node blocks path: {}", blocks_path.display());
 
-    let mut runtime = NodeRuntime {
+    let runtime = Arc::new(Mutex::new(NodeRuntime {
         chain,
         blocks,
         consensus,
         script_engine: DeterministicScriptEngine::default(),
         state_path,
         blocks_path,
-    };
+    }));
 
     if once {
-        sync_all_peers(&mut runtime, &peers);
+        sync_all_peers(&runtime, &peers);
         if produce {
-            let _ = produce_one_block(&mut runtime);
+            let _ = produce_one_block(&runtime);
         }
-        print_tip(&runtime);
+        if let Ok(runtime) = runtime.lock() {
+            print_tip(&runtime);
+        }
         return;
     }
 
@@ -287,6 +293,30 @@ fn run_node(
         return;
     }
 
+    let server_runtime = Arc::clone(&runtime);
+    let server_shutdown = Arc::clone(&shutdown_requested);
+    let server_thread = thread::spawn(move || {
+        while !server_shutdown.load(Ordering::SeqCst) {
+            match server.recv_timeout(Duration::from_millis(100)) {
+                Ok(Some(request)) => {
+                    let mut runtime = match server_runtime.lock() {
+                        Ok(runtime) => runtime,
+                        Err(err) => {
+                            eprintln!("Failed to lock runtime for request handling: {err}");
+                            break;
+                        }
+                    };
+                    handle_request(&mut runtime, request);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    eprintln!("HTTP server error: {err}");
+                    break;
+                }
+            }
+        }
+    });
+
     let produce_every = Duration::from_secs(interval_seconds.max(1));
     let sync_every = Duration::from_secs(sync_interval_seconds.max(1));
     let mut last_produce = Instant::now() - produce_every;
@@ -298,27 +328,21 @@ fn run_node(
             break;
         }
 
-        while let Ok(Some(request)) = server.recv_timeout(Duration::from_millis(20)) {
-            handle_request(&mut runtime, request);
-            if shutdown_requested.load(Ordering::SeqCst) {
-                println!("Shutdown requested, finishing current loop.");
-                break;
-            }
-        }
-
         let now = Instant::now();
         if now.duration_since(last_sync) >= sync_every {
-            sync_all_peers(&mut runtime, &peers);
+            sync_all_peers(&runtime, &peers);
             last_sync = now;
         }
 
         if produce && now.duration_since(last_produce) >= produce_every {
-            let _ = produce_one_block(&mut runtime);
+            let _ = produce_one_block(&runtime);
             last_produce = now;
         }
 
         thread::sleep(Duration::from_millis(80));
     }
+
+    let _ = server_thread.join();
 }
 
 fn handle_request(runtime: &mut NodeRuntime, mut request: Request) {
@@ -410,7 +434,7 @@ fn handle_request(runtime: &mut NodeRuntime, mut request: Request) {
     }
 }
 
-fn sync_all_peers(runtime: &mut NodeRuntime, peers: &[String]) {
+fn sync_all_peers(runtime: &Arc<Mutex<NodeRuntime>>, peers: &[String]) {
     for peer in peers {
         if let Err(err) = sync_from_peer(runtime, peer) {
             eprintln!("Peer sync failed for {peer}: {err}");
@@ -418,7 +442,7 @@ fn sync_all_peers(runtime: &mut NodeRuntime, peers: &[String]) {
     }
 }
 
-fn sync_from_peer(runtime: &mut NodeRuntime, peer: &str) -> Result<(), String> {
+fn sync_from_peer(runtime: &Arc<Mutex<NodeRuntime>>, peer: &str) -> Result<(), String> {
     let base = peer.trim_end_matches('/');
     let tip_url = format!("{base}/tip");
     let tip: TipResponse = ureq::get(&tip_url)
@@ -428,8 +452,17 @@ fn sync_from_peer(runtime: &mut NodeRuntime, peer: &str) -> Result<(), String> {
         .into_json()
         .map_err(|err| format!("tip parse failed: {err}"))?;
 
-    while runtime.chain.height < tip.height {
-        let next_height = runtime.chain.height + 1;
+    loop {
+        let next_height = {
+            let runtime = runtime
+                .lock()
+                .map_err(|err| format!("failed to lock runtime during sync: {err}"))?;
+            if runtime.chain.height >= tip.height {
+                break;
+            }
+            runtime.chain.height + 1
+        };
+
         let block_url = format!("{base}/blocks/{next_height}");
         let response = ureq::get(&block_url)
             .timeout(Duration::from_secs(3))
@@ -443,22 +476,32 @@ fn sync_from_peer(runtime: &mut NodeRuntime, peer: &str) -> Result<(), String> {
         let block: Block = bincode::deserialize(&block_bytes)
             .map_err(|err| format!("block parse failed at {next_height}: {err}"))?;
 
-        apply_block(runtime, block)?;
+        let mut runtime = runtime
+            .lock()
+            .map_err(|err| format!("failed to lock runtime while applying block: {err}"))?;
+        apply_block(&mut runtime, block)?;
     }
 
     Ok(())
 }
 
-fn produce_one_block(runtime: &mut NodeRuntime) -> Result<(), String> {
+fn produce_one_block(runtime: &Arc<Mutex<NodeRuntime>>) -> Result<(), String> {
+    let mut runtime = runtime
+        .lock()
+        .map_err(|err| format!("failed to lock runtime for block production: {err}"))?;
     let txs: Vec<Transaction> = Vec::new();
     let block = runtime
         .consensus
         .propose_block(&runtime.chain, txs)
         .map_err(|err| format!("Failed to propose block: {err}"))?;
 
-    let height = apply_block(runtime, block)?;
+    let height = apply_block(&mut runtime, block)?;
     println!("Produced block at height {height}");
     Ok(())
+}
+
+fn same_peer_endpoint(peer: &str, self_peer_url: &str) -> bool {
+    peer.trim_end_matches('/').eq_ignore_ascii_case(self_peer_url)
 }
 
 fn apply_block(runtime: &mut NodeRuntime, block: Block) -> Result<u64, String> {

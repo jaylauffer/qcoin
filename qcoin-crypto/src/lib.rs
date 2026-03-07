@@ -385,7 +385,7 @@ fn signature_size(scheme: SignatureSchemeId) -> Option<usize> {
     }
 }
 
-pub trait PqSignatureScheme {
+pub trait PqSignatureScheme: Send + Sync {
     fn id(&self) -> SignatureSchemeId;
     fn keygen(&self) -> Result<(PublicKey, PrivateKey), CryptoError>;
     fn sign(&self, sk: &PrivateKey, msg: &[u8]) -> Result<Signature, CryptoError>;
