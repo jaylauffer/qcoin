@@ -6,9 +6,14 @@ use qcoin_script::DeterministicScriptEngine;
 use qcoin_types::{Block, Transaction};
 use serde::{Deserialize, Serialize};
 use std::{
+    ffi::OsString,
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -273,14 +278,32 @@ fn run_node(
     };
     println!("HTTP API listening on http://{listen_addr}");
 
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let shutdown_signal = Arc::clone(&shutdown_requested);
+    if let Err(err) = ctrlc::set_handler(move || {
+        shutdown_signal.store(true, Ordering::SeqCst);
+    }) {
+        eprintln!("Failed to install shutdown handler: {err}");
+        return;
+    }
+
     let produce_every = Duration::from_secs(interval_seconds.max(1));
     let sync_every = Duration::from_secs(sync_interval_seconds.max(1));
     let mut last_produce = Instant::now() - produce_every;
     let mut last_sync = Instant::now() - sync_every;
 
     loop {
+        if shutdown_requested.load(Ordering::SeqCst) {
+            println!("Shutdown requested, exiting cleanly.");
+            break;
+        }
+
         while let Ok(Some(request)) = server.recv_timeout(Duration::from_millis(20)) {
             handle_request(&mut runtime, request);
+            if shutdown_requested.load(Ordering::SeqCst) {
+                println!("Shutdown requested, finishing current loop.");
+                break;
+            }
         }
 
         let now = Instant::now();
@@ -583,14 +606,7 @@ fn load_chain_state(path: &Path) -> Option<ChainState> {
 
 fn save_chain_state(path: &Path, chain: &ChainState) -> Result<(), String> {
     let state = serde_json::to_string_pretty(chain).map_err(|err| err.to_string())?;
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-    }
-
-    let mut file = File::create(path).map_err(|err| err.to_string())?;
-    file.write_all(state.as_bytes())
-        .map_err(|err| err.to_string())
+    write_file_atomically(path, state.as_bytes())
 }
 
 fn load_block_history(path: &Path) -> Option<Vec<Block>> {
@@ -605,14 +621,28 @@ fn load_block_history(path: &Path) -> Option<Vec<Block>> {
 
 fn save_block_history(path: &Path, blocks: &[Block]) -> Result<(), String> {
     let encoded = serde_json::to_string_pretty(blocks).map_err(|err| err.to_string())?;
+    write_file_atomically(path, encoded.as_bytes())
+}
 
+fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
 
-    let mut file = File::create(path).map_err(|err| err.to_string())?;
-    file.write_all(encoded.as_bytes())
-        .map_err(|err| err.to_string())
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("path '{}' has no file name", path.display()))?;
+    let mut temp_name = OsString::from(file_name);
+    temp_name.push(".tmp");
+    let temp_path = path.with_file_name(temp_name);
+
+    {
+        let mut file = File::create(&temp_path).map_err(|err| err.to_string())?;
+        file.write_all(contents).map_err(|err| err.to_string())?;
+        file.sync_all().map_err(|err| err.to_string())?;
+    }
+
+    fs::rename(&temp_path, path).map_err(|err| err.to_string())
 }
 
 fn generate_keypair(scheme: SchemeArg) {
