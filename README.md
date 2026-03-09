@@ -81,6 +81,9 @@ The repo contains deploy artifacts for running `qcoin-node` as a boot-time servi
 - `deploy/qcoin-node-launch.sh`
 - `deploy/qcoin-node.env.example`
 - `deploy/network-config.10.10.10.1.example.json`
+- `deploy/render-node-config.sh`
+
+For a concrete `10.10.10.1` / `10.10.10.2` / `10.10.10.3` bring-up sequence, including an observer-only `10.10.10.3` and EAB integration, see `docs/three-node-eab-workflow.md`.
 
 The recommended layout on a machine is:
 
