@@ -21,9 +21,9 @@ cd /home/jay/pudding/qcoin
 cargo build --release -p qcoin-node
 ```
 
-## Phase 2: Generate validator keys
+## Phase 2: Generate/install node keypairs
 
-Generate one keypair on `10.10.10.1` and one on `10.10.10.2`:
+Generate one keypair on each machine (`10.10.10.1`, `10.10.10.2`, and `10.10.10.3`):
 
 ```bash
 ./target/release/qcoin-node keygen > /tmp/node-keypair.json
@@ -36,7 +36,9 @@ sudo install -d -m 0755 /etc/qcoin
 sudo install -m 0600 /tmp/node-keypair.json /etc/qcoin/node-keypair.json
 ```
 
-Extract and save the `public_key_hex` from both machines. Those two public keys are the initial validator set.
+Extract and save the `public_key_hex` from `10.10.10.1` and `10.10.10.2`. Those two public keys are the initial validator set.
+
+`10.10.10.3` still needs a local keypair file at `/etc/qcoin/node-keypair.json` even when running with `QCOIN_PRODUCE=false`; the service launch script requires `QCOIN_KEYPAIR_JSON` to exist on every node.
 
 If `10.10.10.3` is later cleaned and promoted to a validator, generate a third keypair there and update the validator set on all nodes.
 
