@@ -1,0 +1,19 @@
+[package]
+name = "qcoin-crypto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cryptographic primitives for qcoin"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+pqcrypto-dilithium = "0.5"
+pqcrypto-falcon = "0.4"
+pqcrypto-traits = "0.3"
+zeroize = { version = "1", features = ["alloc"] }

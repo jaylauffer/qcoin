@@ -1,0 +1,19 @@
+[package]
+name = "qcoin-consensus"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Consensus algorithm and block validation for qcoin blockchain"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+thiserror.workspace = true
+qcoin-types.workspace = true
+qcoin-ledger.workspace = true
+qcoin-crypto.workspace = true
+qcoin-script.workspace = true
+blake3.workspace = true

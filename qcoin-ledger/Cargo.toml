@@ -1,0 +1,21 @@
+[package]
+name = "qcoin-ledger"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Blockchain state management and UTXO tracking for qcoin"
+keywords = ["blockchain", "ledger", "utxo", "database", "qcoin"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+qcoin-types.workspace = true
+qcoin-script.workspace = true
+qcoin-crypto.workspace = true
+blake3.workspace = true
+bincode.workspace = true

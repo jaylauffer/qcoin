@@ -1,0 +1,18 @@
+[Unit]
+Description=QCoin single node
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+ExecStart=/usr/local/bin/qcoin-single-node.sh
+Restart=always
+RestartSec=5
+Environment=QCOIN_CONFIG=/etc/qcoin/single-node.ini
+StandardOutput=append:/var/log/qcoin/node.log
+StandardError=append:/var/log/qcoin/node.err
+
+[Install]
+WantedBy=multi-user.target

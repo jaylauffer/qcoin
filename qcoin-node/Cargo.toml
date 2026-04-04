@@ -1,0 +1,24 @@
+[package]
+name = "qcoin-node"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Full node implementation and network protocol for qcoin blockchain"
+keywords = ["blockchain", "node", "p2p", "network", "qcoin"]
+categories = ["network-programming", "cryptography"]
+
+[dependencies]
+qcoin-types.workspace = true
+qcoin-ledger.workspace = true
+qcoin-consensus.workspace = true
+qcoin-script.workspace = true
+qcoin-crypto.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+tiny_http.workspace = true
+ureq.workspace = true
+ctrlc.workspace = true

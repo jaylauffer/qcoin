@@ -1,0 +1,43 @@
+[workspace]
+members = [
+    "qcoin-crypto",
+    "qcoin-types",
+    "qcoin-script",
+    "qcoin-ledger",
+    "qcoin-consensus",
+    "qcoin-node",
+]
+resolver = "2"
+
+[workspace.package]
+name = "loadngo-pq-coin"
+version = "0.1.1"
+edition = "2021"
+authors = ["qcoin maintainers"]
+license = "BSD-3-Clause"
+repository = "https://github.com/jaylauffer/qcoin"
+description = "A quantum-resistant cryptocurrency implementation"
+
+[workspace.dependencies]
+# External dependencies
+bincode = "1"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+pqcrypto-dilithium = "0.5"
+pqcrypto-falcon = "0.4"
+pqcrypto-traits = "0.3"
+tiny_http = "0.12"
+ureq = { version = "2.12", features = ["json"] }
+zeroize = { version = "1", features = ["alloc"] }
+
+# Internal qcoin workspace dependencies
+qcoin-crypto = { path = "qcoin-crypto", version = "0.1" }
+qcoin-types = { path = "qcoin-types", version = "0.1" }
+qcoin-script = { path = "qcoin-script", version = "0.1" }
+qcoin-ledger = { path = "qcoin-ledger", version = "0.1" }
+qcoin-consensus = { path = "qcoin-consensus", version = "0.1" }
+qcoin-node = { path = "qcoin-node", version = "0.1" }

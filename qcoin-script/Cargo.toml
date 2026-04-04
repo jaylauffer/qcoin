@@ -1,0 +1,18 @@
+[package]
+name = "qcoin-script"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Scripting engine and transaction validation for qcoin blockchain"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+qcoin-crypto.workspace = true
+qcoin-types.workspace = true
+blake3.workspace = true

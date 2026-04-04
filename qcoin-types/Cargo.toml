@@ -1,0 +1,17 @@
+[package]
+name = "qcoin-types"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core types and data structures for qcoin"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+qcoin-crypto.workspace = true
