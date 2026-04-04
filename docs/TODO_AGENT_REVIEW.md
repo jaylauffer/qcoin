@@ -1,0 +1,208 @@
+# QCoin Agent Review TODO
+
+Purpose: give future agents a concrete, execution-oriented checklist for reviewing, hardening, and extending QCoin.
+
+## Current snapshot
+
+QCoin currently contains:
+- `qcoin-crypto`
+- `qcoin-types`
+- `qcoin-script`
+- `qcoin-ledger`
+- `qcoin-consensus`
+- `qcoin-node`
+
+The node currently supports:
+- `GET /tip`
+- `GET /blocks/{height}`
+- `POST /blocks`
+- local block production
+- pull-based peer sync
+- persisted chain state and block history
+
+## Priority 0: preserve integrity and recoverability
+
+### 1. Make persistence crash-safe
+Current risk:
+- `qcoin-node` saves chain state and block history as separate files.
+- a crash between those writes can leave the node unrecoverable or refusing startup.
+
+Tasks:
+- review `apply_block()` persistence path
+- design one of these approaches:
+  - single snapshot file containing both chain state and block history
+  - write-ahead journal plus replay
+  - atomic manifest/version swap model
+- implement crash-safe persistence
+- document on-disk format
+
+Required tests:
+- simulate interrupted write after state save and before block-history save
+- verify restart behavior is deterministic and recoverable
+- verify no silent truncation or height mismatch remains
+
+### 2. Add startup repair path
+Current risk:
+- startup refuses to continue if block history is shorter than chain height
+- no automated recovery path exists
+
+Tasks:
+- define repair policy for mismatched state/history files
+- choose whether to:
+  - rebuild state from blocks
+  - truncate state to known-good height
+  - stop with explicit repair command
+- implement and document the chosen behavior
+
+Required tests:
+- state ahead of blocks
+- blocks ahead of state
+- corrupted history JSON
+- corrupted state JSON
+
+## Priority 1: correct distributed behavior
+
+### 3. Define fork-choice and divergence handling
+Current risk:
+- peer sync pulls only by height
+- equal-height divergent chains are not reconciled
+- no rollback/reorg mechanism exists
+
+Tasks:
+- define chain selection rule
+- add detection for same-height different-tip cases
+- add rollback or alternate branch handling if desired
+- document whether current system is append-only replication or true blockchain fork resolution
+
+Required tests:
+- two peers with same height and different tips
+- remote longer valid chain
+- remote invalid chain
+- remote shorter chain
+
+### 4. Improve peer sync robustness
+Tasks:
+- add explicit network timeouts and retry/backoff policy review
+- classify sync failures into transport, parse, validation, and persistence errors
+- improve sync logging for operator diagnosis
+- consider sync checkpoint or batch mode for large histories
+
+Required tests:
+- timeout during `/tip`
+- timeout during `/blocks/{height}`
+- malformed block payload
+- valid block rejected by consensus
+
+## Priority 2: consensus and validator handling
+
+### 5. Harden validator configuration behavior
+Tasks:
+- review validator key parsing and normalization
+- reject mixed schemes or invalid duplicates clearly
+- define whether validator order is consensus-critical
+- document proposer rotation semantics
+
+Required tests:
+- duplicate validator keys
+- empty validator set
+- malformed validator key hex
+- mismatched signing scheme
+
+### 6. Review timestamp semantics
+Current risk:
+- validation only checks that timestamp is strictly increasing versus previous block
+- no future-skew policy is defined
+
+Tasks:
+- decide acceptable future clock skew
+- implement validation rule if needed
+- document operational expectations for multi-node deployments
+
+Required tests:
+- timestamp equal to previous block
+- timestamp lower than previous block
+- timestamp far in the future
+
+## Priority 3: transaction flow and product completeness
+
+### 7. Add transaction submission path
+Current gap:
+- node currently accepts blocks, not user transactions
+- local producer creates empty blocks only
+
+Tasks:
+- design transaction admission endpoint
+- add mempool or staged transaction queue
+- validate transactions before inclusion
+- include queued transactions in produced blocks
+- document transaction lifecycle
+
+Required tests:
+- valid transaction accepted into mempool
+- invalid transaction rejected
+- duplicate transaction rejected
+- block producer includes pending transactions
+
+### 8. Expand script and asset workflow coverage
+Tasks:
+- review `qcoin-ledger` asset and script invariants
+- identify missing transaction kinds and asset lifecycle rules
+- define metadata and issuer authorization expectations more fully
+
+Required tests to add:
+- multi-input multi-output conservation case
+- zero-asset outputs with metadata only
+- repeated asset creation attempts across heights
+- cross-asset conservation edge cases
+- large witness payload rejection policy if needed
+
+## Priority 4: operational polish
+
+### 9. Improve node observability
+Tasks:
+- add structured logs or consistent log prefixes
+- expose basic health and sync diagnostics
+- record current peers, tip, last successful sync, and last validation failure
+
+### 10. Deployment review
+Tasks:
+- review `deploy/` assets for completeness
+- verify systemd environment assumptions
+- confirm example configs match actual runtime flags
+- add minimal operator runbook
+
+## QCoin + EAB integration tasks
+
+### 11. Stabilize remote block submission expectations
+Known concern:
+- EAB mirroring currently uses a fresh default dummy consensus engine when anchoring locally
+- that may not align with a real qcoin-node validator set used for remote submission
+
+Tasks:
+- define supported integration contract between EAB and QCoin
+- decide whether EAB should:
+  - submit transactions only
+  - submit unsigned block intents
+  - sign with a configured validator identity
+- remove any ambiguous behavior
+
+Required tests:
+- EAB mirror to local-only state
+- EAB mirror to remote qcoin-node with matching validator
+- EAB mirror to remote qcoin-node with mismatched validator
+
+## Suggested execution order
+1. crash-safe persistence
+2. startup repair logic
+3. divergence/fork handling definition
+4. validator/timestamp hardening
+5. transaction submission + mempool
+6. EAB integration cleanup
+7. observability and deployment polish
+
+## Deliverables expected from future agents
+For each completed task, future agents should produce:
+- code changes
+- tests covering failure paths and happy paths
+- short design notes in `docs/`
+- clear statement of remaining tradeoffs

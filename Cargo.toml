@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "qcoin-crypto",
+    "qcoin-types",
+    "qcoin-script",
+    "qcoin-ledger",
+    "qcoin-consensus",
+    "qcoin-node",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"

@@ -1,0 +1,15 @@
+[package]
+name = "qcoin-crypto"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+pqcrypto-dilithium = "0.5"
+pqcrypto-falcon = "0.4"
+pqcrypto-traits = "0.3"
+zeroize = { version = "1", features = ["alloc"] }
