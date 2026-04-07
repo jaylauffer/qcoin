@@ -35,9 +35,9 @@ ureq = { version = "2.12", features = ["json"] }
 zeroize = { version = "1", features = ["alloc"] }
 
 # Internal qcoin workspace dependencies
-qcoin-crypto = { path = "qcoin-crypto", version = "0.1" }
-qcoin-types = { path = "qcoin-types", version = "0.1" }
-qcoin-script = { path = "qcoin-script", version = "0.1" }
-qcoin-ledger = { path = "qcoin-ledger", version = "0.1" }
-qcoin-consensus = { path = "qcoin-consensus", version = "0.1" }
-qcoin-node = { path = "qcoin-node", version = "0.1" }
+qcoin-crypto = { path = "qcoin-crypto" }
+qcoin-types = { path = "qcoin-types" }
+qcoin-script = { path = "qcoin-script" }
+qcoin-ledger = { path = "qcoin-ledger" }
+qcoin-consensus = { path = "qcoin-consensus" }
+qcoin-node = { path = "qcoin-node" }
