@@ -109,7 +109,8 @@ If the change touches node runtime behavior, also exercise a minimal run path su
 - incompatible file layout without migration notes
 
 ### Peer sync assumptions
-Current sync is simple. Be careful not to imply full fork resolution if only forward sync exists.
+Current long-running sync is simple UDP qcoin-wire replication driven by `loadngo-proactor` and `loadngo/network`, with an explicit hello handshake, optional multicast discovery, and no full fork resolution yet.
+HTTP endpoints remain compatibility and inspection surfaces, and `--once` still uses the older HTTP sync path.
 If adding divergence detection, keep the reported behavior explicit.
 
 ### Validator handling

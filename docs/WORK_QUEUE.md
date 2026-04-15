@@ -115,9 +115,10 @@ Goal:
 - improve resilience and diagnosability of peer sync
 
 Tasks:
-- classify errors by transport/parse/validation/persistence
+- classify errors by discovery/transport/parse/validation/persistence
 - improve log messages
-- review timeout and retry behavior
+- review timeout and retry behavior for qcoin UDP wire traffic and multicast discovery
+- include handshake/version mismatch diagnostics in peer failure reporting
 
 Definition of done:
 - logs are meaningfully actionable
@@ -255,7 +256,7 @@ Goal:
 Tasks:
 - verify `deploy/` files match actual flags and behavior
 - add minimal runbook
-- add troubleshooting notes for validator and peer issues
+- add troubleshooting notes for validator, peer, and multicast interface issues
 
 Definition of done:
 - docs allow a clean bring-up without source spelunking

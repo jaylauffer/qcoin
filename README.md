@@ -23,10 +23,21 @@ cargo run -p qcoin-node -- keygen
 
 Runtime artifacts are written under `data/` by default (`data/qcoin-chain-state.json` and matching `*.blocks.json`), and are git-ignored.
 
-## Node communication (HTTP + pull sync)
+## Node communication
 
-`qcoin-node` now supports static peers and block synchronization over HTTP:
+`qcoin-node` now runs its live peer core over `loadngo-proactor` and `loadngo/network`:
 
+- UDP peer traffic is handled by the proactor-backed node core.
+- Static peers are resolved from `--peer` entries, and `http://...` peer URLs are still accepted for compatibility.
+- Optional IPv6 multicast discovery can be configured in `network-config.json`.
+- Nodes exchange an explicit `HelloRequest` / `HelloResponse` handshake before normal UDP sync.
+- When a node is running normally, peer tip exchange and block propagation happen over the UDP qcoin wire protocol.
+- Multicast is used for discovery and bootstrap only; block sync and block propagation stay unicast after peers are learned.
+- The HTTP API is still exposed as an adapter for inspection and compatibility tooling.
+
+HTTP endpoints:
+
+- `GET /node-info` -> node software version, qcoin wire version, compatibility floor, chain ID, and capability list
 - `GET /tip` -> current tip metadata (`height`, `tip_hash_hex`, `state_root_hex`)
 - `GET /blocks/{height}` -> binary (`bincode`) encoded block for 1-based height
 - `POST /blocks` -> submit binary (`bincode`) encoded block
@@ -62,13 +73,15 @@ cargo run -p qcoin-node -- run \
   --blocks-path data/qcoin_b_blocks.json
 ```
 
+For a continuously running second node, the same `--peer` value will now be used by the UDP node core instead of the old sleep-loop HTTP pull path. The node first exchanges a hello handshake, then starts tip and block sync against compatible peers only.
+
 ### Run flags (selected)
 
-- `--peer <url>` repeatable static peer list (example: `http://127.0.0.1:9710`)
-- `--listen <addr>` HTTP bind address
-- `--sync-interval-seconds <n>` periodic pull-sync interval
+- `--peer <url>` repeatable static peer list (example: `http://127.0.0.1:9710` or `127.0.0.1:9710`)
+- `--listen <addr>` shared HTTP/UDP bind address
+- `--sync-interval-seconds <n>` periodic UDP tip-sync interval for the live node core
 - `--produce=<true|false>` whether this node proposes local empty blocks
-- `--network-config-json <path>` JSON file containing peer URLs and validator public keys
+- `--network-config-json <path>` JSON file containing peer URLs, validator public keys, and optional multicast discovery settings
 - `--validator-public-key-hex <hex>` validator set entries for signature/proposer checks
 - `--keypair-json <path>` signer keypair file from `keygen`
 - `--blocks-path <path>` explicit block history persistence path
@@ -128,7 +141,8 @@ Capture the `public_key_hex` from each machine. All nodes must use the same vali
 
 ### 4. Create `/etc/qcoin/network-config.json`
 
-This file is the source of truth for peers and validator public keys.
+This file is the source of truth for peers, validator public keys, and optional multicast discovery.
+You can keep explicit `peers`, rely on multicast discovery, or use both.
 
 Example for machine `10.10.10.1`:
 
@@ -142,6 +156,12 @@ Example for machine `10.10.10.1`:
     "PUBKEY_FOR_10_10_10_1",
     "PUBKEY_FOR_10_10_10_2",
     "PUBKEY_FOR_10_10_10_3"
+  ],
+  "multicast_v6": [
+    {
+      "group": "ff02::5143:6f69:6e",
+      "interface": 2
+    }
   ]
 }
 ```
@@ -152,7 +172,7 @@ Install it:
 sudo install -m 0644 deploy/network-config.10.10.10.1.example.json /etc/qcoin/network-config.json
 ```
 
-Then edit `/etc/qcoin/network-config.json` and replace the placeholder validator keys with the real `public_key_hex` values.
+Then edit `/etc/qcoin/network-config.json` and replace the placeholder validator keys with the real `public_key_hex` values. If you want LAN discovery over IPv6 multicast, keep the `multicast_v6` entry and set `interface` to the local NIC index, for example from `ip -6 link show`.
 
 ### 5. Create `/etc/qcoin/qcoin-node.env`
 
@@ -200,7 +220,8 @@ tail -f /var/log/qcoin/node.err
 
 - Each machine needs its own `/etc/qcoin/node-keypair.json`.
 - Each machine should have a machine-specific `/etc/qcoin/qcoin-node.env` with its own `QCOIN_LISTEN`.
-- Each machine should have a machine-specific `/etc/qcoin/network-config.json` with its peers listed appropriately.
+- Each machine should have a machine-specific `/etc/qcoin/network-config.json` with its peers listed appropriately, or an intentional multicast-only discovery setup.
+- If you enable `multicast_v6`, use the same multicast group on every node and the correct local interface index on each machine.
 - The `validator_public_key_hex` array must be identical across all three machines.
 - Peer URLs should point at reachable private addresses such as `http://10.10.10.x:9700`.
 
