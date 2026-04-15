@@ -20,6 +20,7 @@ description = "A quantum-resistant cryptocurrency implementation"
 
 [workspace.dependencies]
 # External dependencies
+anyhow = "1"
 bincode = "1"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }

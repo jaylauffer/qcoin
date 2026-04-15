@@ -1,3 +1,6 @@
+mod node;
+mod wire;
+
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use qcoin_consensus::{ConsensusEngine, DummyConsensusEngine};
 use qcoin_crypto::{default_registry, PqSchemeRegistry, PrivateKey, PublicKey, SignatureSchemeId};
@@ -9,13 +12,14 @@ use std::{
     ffi::OsString,
     fs::{self, File},
     io::{Read, Write},
+    net::{Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
@@ -90,9 +94,13 @@ struct NetworkConfig {
     peers: Vec<String>,
     #[serde(default)]
     validator_public_key_hex: Vec<String>,
+    #[serde(default)]
+    multicast_v4: Vec<MulticastV4Config>,
+    #[serde(default)]
+    multicast_v6: Vec<MulticastV6Config>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct TipResponse {
     height: u64,
     tip_hash_hex: String,
@@ -100,11 +108,23 @@ struct TipResponse {
     last_timestamp: u64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SubmitBlockResponse {
     accepted: bool,
     height: u64,
     message: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct MulticastV4Config {
+    group: Ipv4Addr,
+    interface: Ipv4Addr,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct MulticastV6Config {
+    group: Ipv6Addr,
+    interface: u32,
 }
 
 struct NodeRuntime {
@@ -114,6 +134,25 @@ struct NodeRuntime {
     script_engine: DeterministicScriptEngine,
     state_path: PathBuf,
     blocks_path: PathBuf,
+}
+
+impl NetworkConfig {
+    fn multicast_configs(&self) -> Vec<network::MulticastConfig> {
+        let mut configs = Vec::with_capacity(self.multicast_v4.len() + self.multicast_v6.len());
+        configs.extend(self.multicast_v4.iter().copied().map(|entry| {
+            network::MulticastConfig::V4 {
+                group: entry.group,
+                interface: entry.interface,
+            }
+        }));
+        configs.extend(self.multicast_v6.iter().copied().map(|entry| {
+            network::MulticastConfig::V6 {
+                group: entry.group,
+                interface: entry.interface,
+            }
+        }));
+        configs
+    }
 }
 
 fn main() {
@@ -219,6 +258,7 @@ fn run_node(
         None => NetworkConfig::default(),
     };
 
+    let multicast_configs = network_config.multicast_configs();
     let self_peer_url = format!("http://{}", listen_addr.trim_end_matches('/'));
     let peers = merge_unique_strings(network_config.peers, peers)
         .into_iter()
@@ -242,8 +282,12 @@ fn run_node(
         }
     };
 
-    let consensus = match DummyConsensusEngine::from_keys(registry, public_key.clone(), private_key, validators)
-    {
+    let consensus = match DummyConsensusEngine::from_keys(
+        registry,
+        public_key.clone(),
+        private_key,
+        validators,
+    ) {
         Ok(engine) => engine,
         Err(err) => {
             eprintln!("Failed to initialize consensus engine: {err}");
@@ -265,7 +309,7 @@ fn run_node(
     }));
 
     if once {
-        sync_all_peers(&runtime, &peers);
+        sync_all_peers_http(&runtime, &peers);
         if produce {
             let _ = produce_one_block(&runtime);
         }
@@ -283,18 +327,35 @@ fn run_node(
         }
     };
     println!("HTTP API listening on http://{listen_addr}");
+    let http_node_info = match runtime.lock() {
+        Ok(runtime) => {
+            wire::local_node_hello(runtime.chain.chain_id, !multicast_configs.is_empty())
+        }
+        Err(err) => {
+            eprintln!("Failed to lock runtime for node info: {err}");
+            return;
+        }
+    };
 
     let shutdown_requested = Arc::new(AtomicBool::new(false));
-    let shutdown_signal = Arc::clone(&shutdown_requested);
-    if let Err(err) = ctrlc::set_handler(move || {
-        shutdown_signal.store(true, Ordering::SeqCst);
-    }) {
-        eprintln!("Failed to install shutdown handler: {err}");
-        return;
-    }
+    let bind_addr = match node::resolve_bind_addr(&listen_addr) {
+        Ok(bind_addr) => bind_addr,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
+    };
+    let peer_addrs = match node::resolve_peer_addrs(&peers, bind_addr) {
+        Ok(peer_addrs) => peer_addrs,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
+    };
 
     let server_runtime = Arc::clone(&runtime);
     let server_shutdown = Arc::clone(&shutdown_requested);
+    let server_node_info = http_node_info.clone();
     let server_thread = thread::spawn(move || {
         while !server_shutdown.load(Ordering::SeqCst) {
             match server.recv_timeout(Duration::from_millis(100)) {
@@ -306,7 +367,7 @@ fn run_node(
                             break;
                         }
                     };
-                    handle_request(&mut runtime, request);
+                    handle_request(&mut runtime, &server_node_info, request);
                 }
                 Ok(None) => {}
                 Err(err) => {
@@ -317,39 +378,36 @@ fn run_node(
         }
     });
 
-    let produce_every = Duration::from_secs(interval_seconds.max(1));
-    let sync_every = Duration::from_secs(sync_interval_seconds.max(1));
-    let mut last_produce = Instant::now() - produce_every;
-    let mut last_sync = Instant::now() - sync_every;
-
-    loop {
-        if shutdown_requested.load(Ordering::SeqCst) {
-            println!("Shutdown requested, exiting cleanly.");
-            break;
-        }
-
-        let now = Instant::now();
-        if now.duration_since(last_sync) >= sync_every {
-            sync_all_peers(&runtime, &peers);
-            last_sync = now;
-        }
-
-        if produce && now.duration_since(last_produce) >= produce_every {
-            let _ = produce_one_block(&runtime);
-            last_produce = now;
-        }
-
-        thread::sleep(Duration::from_millis(80));
+    if let Err(err) = node::run_network_core(
+        Arc::clone(&runtime),
+        node::CoreConfig {
+            bind_addr,
+            peers: peer_addrs,
+            multicast: multicast_configs,
+            sync_interval: Duration::from_secs(sync_interval_seconds.max(1)),
+            produce_interval: Duration::from_secs(interval_seconds.max(1)),
+            produce,
+        },
+        Arc::clone(&shutdown_requested),
+    ) {
+        eprintln!("{err}");
+        shutdown_requested.store(true, Ordering::SeqCst);
+        let _ = server_thread.join();
+        return;
     }
 
+    shutdown_requested.store(true, Ordering::SeqCst);
     let _ = server_thread.join();
 }
 
-fn handle_request(runtime: &mut NodeRuntime, mut request: Request) {
+fn handle_request(runtime: &mut NodeRuntime, node_info: &wire::NodeHello, mut request: Request) {
     let method = request.method().clone();
     let path = request.url().split('?').next().unwrap_or("/").to_string();
 
     match (method, path.as_str()) {
+        (Method::Get, "/node-info") => {
+            let _ = respond_json(request, 200, node_info);
+        }
         (Method::Get, "/tip") => {
             let tip = TipResponse {
                 height: runtime.chain.height,
@@ -371,20 +429,15 @@ fn handle_request(runtime: &mut NodeRuntime, mut request: Request) {
             };
 
             match runtime.blocks.get((height - 1) as usize) {
-                Some(block) => {
-                    match bincode::serialize(block) {
-                        Ok(payload) => {
-                            let _ = respond_binary(request, 200, payload);
-                        }
-                        Err(err) => {
-                            let _ = respond_text(
-                                request,
-                                500,
-                                &format!("failed to encode block: {err}"),
-                            );
-                        }
+                Some(block) => match bincode::serialize(block) {
+                    Ok(payload) => {
+                        let _ = respond_binary(request, 200, payload);
                     }
-                }
+                    Err(err) => {
+                        let _ =
+                            respond_text(request, 500, &format!("failed to encode block: {err}"));
+                    }
+                },
                 None => {
                     let _ = respond_text(request, 404, "block not found");
                 }
@@ -434,16 +487,31 @@ fn handle_request(runtime: &mut NodeRuntime, mut request: Request) {
     }
 }
 
-fn sync_all_peers(runtime: &Arc<Mutex<NodeRuntime>>, peers: &[String]) {
+fn sync_all_peers_http(runtime: &Arc<Mutex<NodeRuntime>>, peers: &[String]) {
     for peer in peers {
-        if let Err(err) = sync_from_peer(runtime, peer) {
+        if let Err(err) = sync_from_peer_http(runtime, peer) {
             eprintln!("Peer sync failed for {peer}: {err}");
         }
     }
 }
 
-fn sync_from_peer(runtime: &Arc<Mutex<NodeRuntime>>, peer: &str) -> Result<(), String> {
+fn sync_from_peer_http(runtime: &Arc<Mutex<NodeRuntime>>, peer: &str) -> Result<(), String> {
     let base = peer.trim_end_matches('/');
+    let local_hello = {
+        let runtime = runtime
+            .lock()
+            .map_err(|err| format!("failed to lock runtime before node-info request: {err}"))?;
+        wire::local_node_hello(runtime.chain.chain_id, false)
+    };
+    let node_info_url = format!("{base}/node-info");
+    let remote_hello: wire::NodeHello = ureq::get(&node_info_url)
+        .timeout(Duration::from_secs(3))
+        .call()
+        .map_err(|err| format!("node-info request failed: {err}"))?
+        .into_json()
+        .map_err(|err| format!("node-info parse failed: {err}"))?;
+    wire::ensure_hello_compatible(local_hello.chain_id, &remote_hello)?;
+
     let tip_url = format!("{base}/tip");
     let tip: TipResponse = ureq::get(&tip_url)
         .timeout(Duration::from_secs(3))
@@ -485,7 +553,7 @@ fn sync_from_peer(runtime: &Arc<Mutex<NodeRuntime>>, peer: &str) -> Result<(), S
     Ok(())
 }
 
-fn produce_one_block(runtime: &Arc<Mutex<NodeRuntime>>) -> Result<(), String> {
+fn produce_one_block(runtime: &Arc<Mutex<NodeRuntime>>) -> Result<(u64, Block), String> {
     let mut runtime = runtime
         .lock()
         .map_err(|err| format!("failed to lock runtime for block production: {err}"))?;
@@ -495,13 +563,14 @@ fn produce_one_block(runtime: &Arc<Mutex<NodeRuntime>>) -> Result<(), String> {
         .propose_block(&runtime.chain, txs)
         .map_err(|err| format!("Failed to propose block: {err}"))?;
 
-    let height = apply_block(&mut runtime, block)?;
+    let height = apply_block(&mut runtime, block.clone())?;
     println!("Produced block at height {height}");
-    Ok(())
+    Ok((height, block))
 }
 
 fn same_peer_endpoint(peer: &str, self_peer_url: &str) -> bool {
-    peer.trim_end_matches('/').eq_ignore_ascii_case(self_peer_url)
+    peer.trim_end_matches('/')
+        .eq_ignore_ascii_case(self_peer_url)
 }
 
 fn apply_block(runtime: &mut NodeRuntime, block: Block) -> Result<u64, String> {

@@ -12,6 +12,8 @@ Usage:
     [--validator-public-key-hex PUBKEY3] \
     [--peer-ip 10.10.10.2] \
     [--peer-ip 10.10.10.3] \
+    [--multicast-v6-group ff02::5143:6f69:6e] \
+    [--multicast-v6-interface 2] \
     [--produce true]
 
 Writes:
@@ -46,6 +48,8 @@ keypair_json="/etc/qcoin/node-keypair.json"
 network_config_json="/etc/qcoin/network-config.json"
 declare -a validator_keys=()
 declare -a peer_ips=()
+multicast_v6_group=""
+multicast_v6_interface=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -109,6 +113,14 @@ while [[ $# -gt 0 ]]; do
       peer_ips+=("${2:-}")
       shift 2
       ;;
+    --multicast-v6-group)
+      multicast_v6_group="${2:-}"
+      shift 2
+      ;;
+    --multicast-v6-interface)
+      multicast_v6_interface="${2:-}"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -129,6 +141,16 @@ fi
 
 if [[ ${#validator_keys[@]} -eq 0 ]]; then
   echo "At least one --validator-public-key-hex is required" >&2
+  exit 1
+fi
+
+if [[ -n "$multicast_v6_group" && -z "$multicast_v6_interface" ]]; then
+  echo "--multicast-v6-interface is required when --multicast-v6-group is set" >&2
+  exit 1
+fi
+
+if [[ -z "$multicast_v6_group" && -n "$multicast_v6_interface" ]]; then
+  echo "--multicast-v6-group is required when --multicast-v6-interface is set" >&2
   exit 1
 fi
 
@@ -178,7 +200,18 @@ EOF
     fi
     printf '    "%s"%s\n' "${validator_keys[$i]}" "$comma"
   done
-  printf '  ]\n'
+  printf '  ]'
+  if [[ -n "$multicast_v6_group" ]]; then
+    printf ',\n'
+    printf '  "multicast_v6": [\n'
+    printf '    {\n'
+    printf '      "group": "%s",\n' "$multicast_v6_group"
+    printf '      "interface": %s\n' "$multicast_v6_interface"
+    printf '    }\n'
+    printf '  ]\n'
+  else
+    printf '\n'
+  fi
   printf '}\n'
 } >"$network_path"
 

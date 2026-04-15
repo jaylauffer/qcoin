@@ -13,11 +13,15 @@ QCoin currently contains:
 - `qcoin-node`
 
 The node currently supports:
+- `GET /node-info`
 - `GET /tip`
 - `GET /blocks/{height}`
 - `POST /blocks`
 - local block production
-- pull-based peer sync
+- explicit qcoin hello handshake with chain and wire-version compatibility checks
+- proactor-driven UDP peer sync for long-running nodes
+- optional IPv6 multicast discovery for peer bootstrap
+- HTTP compatibility sync for `--once`
 - persisted chain state and block history
 
 ## Priority 0: preserve integrity and recoverability
@@ -64,7 +68,7 @@ Required tests:
 
 ### 3. Define fork-choice and divergence handling
 Current risk:
-- peer sync pulls only by height
+- peer sync still advances only by height
 - equal-height divergent chains are not reconciled
 - no rollback/reorg mechanism exists
 
@@ -83,14 +87,14 @@ Required tests:
 ### 4. Improve peer sync robustness
 Tasks:
 - add explicit network timeouts and retry/backoff policy review
-- classify sync failures into transport, parse, validation, and persistence errors
+- classify sync failures into discovery, transport, parse, validation, and persistence errors
 - improve sync logging for operator diagnosis
 - consider sync checkpoint or batch mode for large histories
 
 Required tests:
-- timeout during `/tip`
-- timeout during `/blocks/{height}`
-- malformed block payload
+- timeout or no-response during UDP tip discovery
+- timeout or no-response during UDP `BlockRequest` / `BlockResponse`
+- malformed qcoin UDP frame
 - valid block rejected by consensus
 
 ## Priority 2: consensus and validator handling

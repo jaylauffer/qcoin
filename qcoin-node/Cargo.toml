@@ -10,6 +10,7 @@ keywords = ["blockchain", "node", "p2p", "network", "qcoin"]
 categories = ["network-programming", "cryptography"]
 
 [dependencies]
+anyhow.workspace = true
 qcoin-types.workspace = true
 qcoin-ledger.workspace = true
 qcoin-consensus.workspace = true
@@ -22,3 +23,8 @@ bincode.workspace = true
 tiny_http.workspace = true
 ureq.workspace = true
 ctrlc.workspace = true
+loadngo-proactor = { path = "../../loadngo/proactor" }
+network = { path = "../../loadngo/network" }
+
+[dev-dependencies]
+tempfile = "3"

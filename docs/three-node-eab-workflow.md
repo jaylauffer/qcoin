@@ -63,6 +63,8 @@ Example for `10.10.10.1` as a producer:
   --output-dir /tmp/qcoin-config-10.10.10.1 \
   --validator-public-key-hex PUBKEY_FOR_10_10_10_1 \
   --validator-public-key-hex PUBKEY_FOR_10_10_10_2 \
+  --multicast-v6-group ff02::5143:6f69:6e \
+  --multicast-v6-interface 2 \
   --produce true
 ```
 
@@ -74,6 +76,8 @@ Example for `10.10.10.2` as a producer:
   --output-dir /tmp/qcoin-config-10.10.10.2 \
   --validator-public-key-hex PUBKEY_FOR_10_10_10_1 \
   --validator-public-key-hex PUBKEY_FOR_10_10_10_2 \
+  --multicast-v6-group ff02::5143:6f69:6e \
+  --multicast-v6-interface 2 \
   --produce true
 ```
 
@@ -85,8 +89,13 @@ Example for `10.10.10.3` as an observer:
   --output-dir /tmp/qcoin-config-10.10.10.3 \
   --validator-public-key-hex PUBKEY_FOR_10_10_10_1 \
   --validator-public-key-hex PUBKEY_FOR_10_10_10_2 \
+  --multicast-v6-group ff02::5143:6f69:6e \
+  --multicast-v6-interface 2 \
   --produce false
 ```
+
+Use the same multicast group on every node. The interface index is machine-local; verify it on each host with `ip -6 link show` rather than assuming `2` everywhere.
+In the current node model, multicast only handles discovery. Once peers respond, block sync and propagation continue over unicast UDP.
 
 Install the rendered files on each machine:
 
@@ -111,6 +120,7 @@ Useful checks:
 
 ```bash
 journalctl -u qcoin-node.service -f
+curl http://10.10.10.1:9700/node-info
 curl http://10.10.10.1:9700/tip
 curl http://10.10.10.2:9700/tip
 curl http://10.10.10.3:9700/tip
