@@ -21,6 +21,7 @@ That means:
 - block application persists block history first
 - chain state is written second
 - startup rebuilds chain state from block history
+- chain state is stored as a JSON snapshot wrapper with explicit array entries for UTXOs and assets, rather than raw JSON maps with binary/struct keys
 
 ## Startup repair policy
 
