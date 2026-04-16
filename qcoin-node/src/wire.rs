@@ -7,7 +7,7 @@ pub const WIRE_VERSION: u16 = 2;
 pub const MIN_COMPATIBLE_WIRE_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NodeHello {
+pub struct NodeInfo {
     pub wire_version: u16,
     pub min_compatible_wire_version: u16,
     pub software_version: String,
@@ -18,8 +18,8 @@ pub struct NodeHello {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WireMessage {
-    HelloRequest,
-    HelloResponse(NodeHello),
+    PresenceAnnounce,
+    NodeInfo(NodeInfo),
     TipRequest,
     TipResponse(TipResponse),
     BlockRequest {
@@ -49,13 +49,13 @@ pub enum WireMessage {
     SubmitTransactionResponse(SubmitTransactionResponse),
 }
 
-pub fn local_node_hello(
+pub fn local_node_info(
     chain_id: u32,
     multicast_enabled: bool,
     node_public_key_hex: String,
     validator: bool,
     producer: bool,
-) -> NodeHello {
+) -> NodeInfo {
     let mut capabilities = vec!["udp-qcoin-wire".to_string(), "http-api".to_string()];
     if multicast_enabled {
         capabilities.push("multicast-discovery".to_string());
@@ -68,7 +68,7 @@ pub fn local_node_hello(
     if producer {
         capabilities.push("block-producer".to_string());
     }
-    NodeHello {
+    NodeInfo {
         wire_version: WIRE_VERSION,
         min_compatible_wire_version: MIN_COMPATIBLE_WIRE_VERSION,
         software_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -78,7 +78,7 @@ pub fn local_node_hello(
     }
 }
 
-pub fn ensure_version_compatible(remote: &NodeHello) -> Result<(), String> {
+pub fn ensure_version_compatible(remote: &NodeInfo) -> Result<(), String> {
     if remote.wire_version < MIN_COMPATIBLE_WIRE_VERSION {
         return Err(format!(
             "peer wire version {} is older than minimum compatible {}",
@@ -94,7 +94,7 @@ pub fn ensure_version_compatible(remote: &NodeHello) -> Result<(), String> {
     Ok(())
 }
 
-pub fn ensure_hello_compatible(local_chain_id: u32, remote: &NodeHello) -> Result<(), String> {
+pub fn ensure_node_info_compatible(local_chain_id: u32, remote: &NodeInfo) -> Result<(), String> {
     ensure_version_compatible(remote)?;
     if remote.chain_id != local_chain_id {
         return Err(format!(
@@ -125,8 +125,8 @@ pub fn decode(frame: &[u8]) -> Result<WireMessage, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode, encode, ensure_hello_compatible, ensure_version_compatible, local_node_hello,
-        NodeHello, WireMessage, WIRE_VERSION,
+        decode, encode, ensure_node_info_compatible, ensure_version_compatible, local_node_info,
+        NodeInfo, WireMessage, WIRE_VERSION,
     };
     use qcoin_types::{Transaction, TransactionCore, TransactionKind, TransactionWitness};
 
@@ -143,11 +143,11 @@ mod tests {
     }
 
     #[test]
-    fn wire_round_trips_hello_response() {
-        let hello = local_node_hello(7, true, "abcd".to_string(), true, true);
-        let encoded = encode(&WireMessage::HelloResponse(hello.clone())).unwrap();
+    fn wire_round_trips_node_info() {
+        let info = local_node_info(7, true, "abcd".to_string(), true, true);
+        let encoded = encode(&WireMessage::NodeInfo(info.clone())).unwrap();
         let decoded = decode(&encoded).unwrap();
-        assert_eq!(decoded, WireMessage::HelloResponse(hello));
+        assert_eq!(decoded, WireMessage::NodeInfo(info));
     }
 
     #[test]
@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn version_compatibility_rejects_newer_minimum() {
-        let remote = NodeHello {
+        let remote = NodeInfo {
             wire_version: WIRE_VERSION + 1,
             min_compatible_wire_version: WIRE_VERSION + 1,
             software_version: "9.9.9".to_string(),
@@ -183,9 +183,9 @@ mod tests {
     }
 
     #[test]
-    fn hello_compatibility_rejects_chain_id_mismatch() {
-        let remote = local_node_hello(9, false, "abcd".to_string(), false, false);
-        let err = ensure_hello_compatible(3, &remote).unwrap_err();
+    fn node_info_compatibility_rejects_chain_id_mismatch() {
+        let remote = local_node_info(9, false, "abcd".to_string(), false, false);
+        let err = ensure_node_info_compatible(3, &remote).unwrap_err();
         assert!(err.contains("chain id"));
     }
 }

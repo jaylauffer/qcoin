@@ -18,7 +18,7 @@ The node currently supports:
 - `GET /blocks/{height}`
 - `POST /blocks`
 - local block production
-- explicit qcoin hello handshake with chain and wire-version compatibility checks
+- explicit qcoin presence announce plus node-info compatibility exchange with chain and wire-version checks
 - proactor-driven UDP peer sync for long-running nodes
 - optional IPv6 multicast discovery for peer bootstrap
 - HTTP compatibility sync for `--once`

@@ -439,7 +439,7 @@ fn run_node(
     };
     println!("HTTP API listening on http://{listen_addr}");
     let http_node_info = match runtime.lock() {
-        Ok(runtime) => wire::local_node_hello(
+        Ok(runtime) => wire::local_node_info(
             runtime.chain.chain_id,
             !startup.multicast.is_empty(),
             runtime.node_public_key_hex.clone(),
@@ -584,8 +584,8 @@ fn submit_transaction_via_udp(tx_json: PathBuf, target: String, timeout_seconds:
                 }
                 return;
             }
-            wire::WireMessage::HelloRequest => continue,
-            wire::WireMessage::HelloResponse(_) => continue,
+            wire::WireMessage::PresenceAnnounce => continue,
+            wire::WireMessage::NodeInfo(_) => continue,
             _ => continue,
         }
     }
@@ -598,7 +598,7 @@ fn load_transaction_json(path: &Path) -> Result<Transaction, String> {
         .map_err(|err| format!("Failed to parse transaction JSON {}: {err}", path.display()))
 }
 
-fn handle_request(runtime: &mut NodeRuntime, node_info: &wire::NodeHello, mut request: Request) {
+fn handle_request(runtime: &mut NodeRuntime, node_info: &wire::NodeInfo, mut request: Request) {
     let method = request.method().clone();
     let path = request.url().split('?').next().unwrap_or("/").to_string();
 
@@ -695,11 +695,11 @@ fn sync_all_peers_http(runtime: &Arc<Mutex<NodeRuntime>>, peers: &[String]) {
 
 fn sync_from_peer_http(runtime: &Arc<Mutex<NodeRuntime>>, peer: &str) -> Result<(), String> {
     let base = peer.trim_end_matches('/');
-    let local_hello = {
+    let local_node_info = {
         let runtime = runtime
             .lock()
             .map_err(|err| format!("failed to lock runtime before node-info request: {err}"))?;
-        wire::local_node_hello(
+        wire::local_node_info(
             runtime.chain.chain_id,
             false,
             runtime.node_public_key_hex.clone(),
@@ -708,13 +708,13 @@ fn sync_from_peer_http(runtime: &Arc<Mutex<NodeRuntime>>, peer: &str) -> Result<
         )
     };
     let node_info_url = format!("{base}/node-info");
-    let remote_hello: wire::NodeHello = ureq::get(&node_info_url)
+    let remote_node_info: wire::NodeInfo = ureq::get(&node_info_url)
         .timeout(Duration::from_secs(3))
         .call()
         .map_err(|err| format!("node-info request failed: {err}"))?
         .into_json()
         .map_err(|err| format!("node-info parse failed: {err}"))?;
-    wire::ensure_hello_compatible(local_hello.chain_id, &remote_hello)?;
+    wire::ensure_node_info_compatible(local_node_info.chain_id, &remote_node_info)?;
 
     let tip_url = format!("{base}/tip");
     let tip: TipResponse = ureq::get(&tip_url)

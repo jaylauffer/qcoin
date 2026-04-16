@@ -34,9 +34,11 @@ Current `qcoin-node` consensus is deterministic proposer scheduling plus append-
 - UDP peer traffic is handled by the proactor-backed node core.
 - Static peers are resolved from `--peer` entries, and `http://...` peer URLs are still accepted for compatibility.
 - If you do not supply an explicit multicast config, the node now enables an embedded IPv6 multicast bootstrap profile on `ff02::5143:6f69:6e`.
-- Nodes exchange an explicit `HelloRequest` / `HelloResponse` handshake before normal UDP sync.
+- Nodes use `PresenceAnnounce` for bootstrap discovery and direct `NodeInfo` replies for compatibility exchange before normal UDP sync.
+- Presence announce is intentionally slow: every 42 seconds to bootstrap targets only. When multicast is configured, that announce goes to the multicast bootstrap group rather than every known peer.
+- Peers respond directly with `NodeInfo`, never via multicast, and each peer rate-limits direct responses to at most once every 42 seconds per source.
 - Transactions are submitted over the UDP qcoin wire and held in an in-memory mempool.
-- Transaction IDs are announced over discovery targets, including the multicast bootstrap group when enabled, and peers fetch full transaction payloads back over unicast UDP.
+- Transaction IDs are announced over bootstrap targets, including the multicast bootstrap group when enabled, and peers fetch full transaction payloads back over unicast UDP.
 - When a node is running normally, peer tip exchange and block propagation happen over the UDP qcoin wire protocol.
 - Multicast is used for discovery/bootstrap and transaction announcement only; deterministic transaction fetch, block sync, and block propagation stay unicast after peers are learned.
 - The node currently accepts only blocks that extend its current local tip; equal-height divergent branches are a fault condition, not a resolved normal case.
@@ -93,13 +95,13 @@ cargo run -p qcoin-node -- run \
   --blocks-path data/qcoin_b_blocks.json
 ```
 
-For a continuously running second node, the same `--peer` value will now be used by the UDP node core instead of the old sleep-loop HTTP pull path. The node first exchanges a hello handshake, then starts tip and block sync against compatible peers only.
+For a continuously running second node, the same `--peer` value will now be used by the UDP node core instead of the old sleep-loop HTTP pull path. The node first exchanges a presence/node-info compatibility exchange, then starts tip and block sync against compatible peers only.
 
 ### Run flags (selected)
 
 - `--peer <url>` repeatable static peer list (example: `http://127.0.0.1:9710` or `127.0.0.1:9710`)
 - `--listen <addr>` shared HTTP/UDP bind address
-- `--sync-interval-seconds <n>` periodic UDP tip-sync interval for the live node core
+- `--sync-interval-seconds <n>` periodic UDP tip-sync interval for the live node core; presence announce runs separately every 42 seconds
 - `--produce=<true|false>` explicit role override; if omitted, the node auto-produces only when its local key is in the manifest validator set
 - `--produce-empty-blocks` allow idle validators to keep creating empty blocks; off by default
 - `--cluster-manifest-json <path>` shared chain/bootstrap manifest containing `chain_id`, validator public keys, reliable node keys, and multicast settings

@@ -1,5 +1,5 @@
 use crate::{
-    apply_block, produce_one_block, wire::NodeHello, NodeRuntime, SubmitBlockResponse,
+    apply_block, produce_one_block, wire::NodeInfo, NodeRuntime, SubmitBlockResponse,
     SubmitTransactionResponse, TipResponse, TransactionAcceptStatus,
 };
 use anyhow::Error;
@@ -36,7 +36,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(not(any(
     target_os = "linux",
@@ -48,6 +48,8 @@ use std::time::Duration;
     target_os = "dragonfly"
 )))]
 const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const PRESENCE_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(42);
+const NODE_INFO_RESPONSE_MIN_INTERVAL: Duration = Duration::from_secs(42);
 #[cfg(unix)]
 const READINESS_TOKEN_BASE: u64 = 0x51434f49_4e5f4e45;
 
@@ -69,9 +71,11 @@ struct SyncState {
     peer_tip_heights: HashMap<SocketAddr, u64>,
     in_flight_blocks: HashMap<SocketAddr, u64>,
     known_peers: HashSet<SocketAddr>,
-    peer_hello: HashMap<SocketAddr, NodeHello>,
+    peer_node_info: HashMap<SocketAddr, NodeInfo>,
     peer_rejections: HashMap<SocketAddr, String>,
     pending_transaction_announcements: HashMap<SocketAddr, HashSet<Hash256>>,
+    peer_last_presence_seen_at: HashMap<SocketAddr, Instant>,
+    peer_last_node_info_sent_at: HashMap<SocketAddr, Instant>,
 }
 
 impl SyncState {
@@ -80,9 +84,11 @@ impl SyncState {
             peer_tip_heights: HashMap::new(),
             in_flight_blocks: HashMap::new(),
             known_peers: HashSet::new(),
-            peer_hello: HashMap::new(),
+            peer_node_info: HashMap::new(),
             peer_rejections: HashMap::new(),
             pending_transaction_announcements: HashMap::new(),
+            peer_last_presence_seen_at: HashMap::new(),
+            peer_last_node_info_sent_at: HashMap::new(),
         }
     }
 }
@@ -359,7 +365,7 @@ where
 {
     runtime: Arc<Mutex<NodeRuntime>>,
     network: Arc<Network>,
-    discovery_targets: Vec<SocketAddr>,
+    bootstrap_targets: Vec<SocketAddr>,
     local_addrs: HashSet<SocketAddr>,
     sync_interval: Duration,
     produce_interval: Duration,
@@ -387,13 +393,13 @@ where
             .map_err(|err| format!("failed to inspect qcoin UDP local addrs: {err:#}"))?
             .into_iter()
             .collect::<HashSet<_>>();
-        let discovery_targets =
+        let bootstrap_targets =
             discovery_targets_for(config.bind_addr, &config.peers, &config.multicast);
         let sync_state = SyncState::new();
         let inner = Arc::new(NodeServiceInner {
             runtime,
             network,
-            discovery_targets,
+            bootstrap_targets,
             local_addrs,
             sync_interval: config.sync_interval,
             produce_interval: config.produce_interval,
@@ -404,6 +410,7 @@ where
             cleanup: Mutex::new(None),
         });
 
+        NodeServiceInner::schedule_presence_announce(&inner, Duration::ZERO)?;
         NodeServiceInner::schedule_sync(&inner, Duration::ZERO)?;
         if inner.produce_enabled {
             NodeServiceInner::schedule_produce(&inner, Duration::ZERO)?;
@@ -428,7 +435,7 @@ where
             .map_err(|err| format!("failed to inspect qcoin UDP local addrs: {err:#}"))?
             .into_iter()
             .collect::<HashSet<_>>();
-        let discovery_targets =
+        let bootstrap_targets =
             discovery_targets_for(config.bind_addr, &config.peers, &config.multicast);
         let sync_state = SyncState::new();
         let socket_fds = network
@@ -439,7 +446,7 @@ where
         let inner = Arc::new(NodeServiceInner {
             runtime,
             network,
-            discovery_targets,
+            bootstrap_targets,
             local_addrs,
             sync_interval: config.sync_interval,
             produce_interval: config.produce_interval,
@@ -465,6 +472,7 @@ where
                 .map_err(|err| format!("failed to register qcoin UDP readiness: {err}"))?;
         }
 
+        NodeServiceInner::schedule_presence_announce(&inner, Duration::ZERO)?;
         NodeServiceInner::schedule_sync(&inner, Duration::ZERO)?;
         if inner.produce_enabled {
             NodeServiceInner::schedule_produce(&inner, Duration::ZERO)?;
@@ -524,9 +532,6 @@ where
         let driver = Arc::clone(this);
         this.handle
             .defer_for(delay, CompletionKind::Net, 0, move |_| {
-                if let Err(err) = driver.broadcast_hello_requests() {
-                    eprintln!("QCoin hello broadcast failed: {err}");
-                }
                 if let Err(err) = driver.broadcast_tip_requests() {
                     eprintln!("QCoin UDP sync request failed: {err}");
                 }
@@ -535,6 +540,23 @@ where
                 }
             })
             .map_err(|err| format!("failed to schedule qcoin sync: {err}"))
+    }
+
+    fn schedule_presence_announce(this: &Arc<Self>, delay: Duration) -> Result<(), String> {
+        let driver = Arc::clone(this);
+        this.handle
+            .defer_for(delay, CompletionKind::Net, 0, move |_| {
+                if let Err(err) = driver.broadcast_presence_announces() {
+                    eprintln!("QCoin presence announce failed: {err}");
+                }
+                if driver.handle.is_running() {
+                    let _ = NodeServiceInner::schedule_presence_announce(
+                        &driver,
+                        PRESENCE_ANNOUNCE_INTERVAL,
+                    );
+                }
+            })
+            .map_err(|err| format!("failed to schedule qcoin presence announce: {err}"))
     }
 
     fn schedule_produce(this: &Arc<Self>, delay: Duration) -> Result<(), String> {
@@ -588,9 +610,9 @@ where
         };
 
         match message {
-            crate::wire::WireMessage::HelloRequest => self.send_local_hello(source),
-            crate::wire::WireMessage::HelloResponse(hello) => {
-                self.handle_hello_response(source, hello)
+            crate::wire::WireMessage::PresenceAnnounce => self.handle_presence_announce(source),
+            crate::wire::WireMessage::NodeInfo(node_info) => {
+                self.handle_node_info(source, node_info)
             }
             crate::wire::WireMessage::TipRequest => {
                 self.ensure_compatible_peer(source)?;
@@ -745,9 +767,9 @@ where
         )
     }
 
-    fn broadcast_hello_requests(&self) -> Result<(), String> {
-        for target in self.discovery_targets() {
-            self.send_wire(target, crate::wire::WireMessage::HelloRequest)?;
+    fn broadcast_presence_announces(&self) -> Result<(), String> {
+        for target in self.bootstrap_targets() {
+            self.send_wire(target, crate::wire::WireMessage::PresenceAnnounce)?;
         }
         Ok(())
     }
@@ -760,7 +782,7 @@ where
     }
 
     fn broadcast_transaction_announce(&self, tx_id: Hash256) -> Result<(), String> {
-        for target in self.discovery_targets() {
+        for target in self.bootstrap_targets() {
             self.send_wire(
                 target,
                 crate::wire::WireMessage::TransactionAnnounce { tx_id },
@@ -832,9 +854,9 @@ where
         self.with_runtime_mut(|runtime| apply_block(runtime, block))
     }
 
-    fn local_hello(&self) -> Result<NodeHello, String> {
+    fn local_node_info(&self) -> Result<NodeInfo, String> {
         self.with_runtime(|runtime| {
-            crate::wire::local_node_hello(
+            crate::wire::local_node_info(
                 runtime.chain.chain_id,
                 !self.network.config().multicast.is_empty(),
                 runtime.node_public_key_hex.clone(),
@@ -844,43 +866,80 @@ where
         })
     }
 
-    fn send_local_hello(&self, source: SocketAddr) -> Result<(), String> {
+    fn send_local_node_info(&self, source: SocketAddr) -> Result<(), String> {
+        {
+            let mut sync_state = self.sync_state.lock().expect("sync state poisoned");
+            sync_state
+                .peer_last_node_info_sent_at
+                .insert(source, Instant::now());
+        }
         self.send_wire(
             source,
-            crate::wire::WireMessage::HelloResponse(self.local_hello()?),
+            crate::wire::WireMessage::NodeInfo(self.local_node_info()?),
         )
     }
 
-    fn handle_hello_response(&self, source: SocketAddr, hello: NodeHello) -> Result<(), String> {
-        if let Err(err) = crate::wire::ensure_hello_compatible(self.current_chain_id()?, &hello) {
+    fn handle_presence_announce(&self, source: SocketAddr) -> Result<(), String> {
+        let should_respond = {
+            let mut sync_state = self.sync_state.lock().expect("sync state poisoned");
+            let now = Instant::now();
+            sync_state.peer_last_presence_seen_at.insert(source, now);
+            !sync_state.known_peers.contains(&source)
+                || sync_state
+                    .peer_last_node_info_sent_at
+                    .get(&source)
+                    .is_none_or(|last| now.duration_since(*last) >= NODE_INFO_RESPONSE_MIN_INTERVAL)
+        };
+
+        if should_respond {
+            self.send_local_node_info(source)?;
+        }
+        Ok(())
+    }
+
+    fn handle_node_info(&self, source: SocketAddr, node_info: NodeInfo) -> Result<(), String> {
+        if let Err(err) =
+            crate::wire::ensure_node_info_compatible(self.current_chain_id()?, &node_info)
+        {
             let mut sync_state = self.sync_state.lock().expect("sync state poisoned");
             sync_state.known_peers.remove(&source);
-            sync_state.peer_hello.remove(&source);
+            sync_state.peer_node_info.remove(&source);
             sync_state.peer_rejections.insert(source, err.clone());
             sync_state.pending_transaction_announcements.remove(&source);
-            eprintln!("Handshake rejected for {source}: {err}");
+            eprintln!("Node info rejected for {source}: {err}");
             return Ok(());
         }
-        let (wire_version, software_version, reliable, pending_tx_ids) = {
+        let (wire_version, software_version, reliable, pending_tx_ids, newly_discovered) = {
             let mut sync_state = self.sync_state.lock().expect("sync state poisoned");
-            let wire_version = hello.wire_version;
-            let software_version = hello.software_version.clone();
-            let peer_key = hello.node_public_key_hex.clone();
+            let wire_version = node_info.wire_version;
+            let software_version = node_info.software_version.clone();
+            let peer_key = node_info.node_public_key_hex.clone();
             let reliable = self.is_reliable_peer_key(&peer_key);
+            let newly_discovered = sync_state.known_peers.insert(source);
             let pending_tx_ids = sync_state
                 .pending_transaction_announcements
                 .remove(&source)
                 .map(|ids| ids.into_iter().collect::<Vec<_>>())
                 .unwrap_or_default();
             sync_state.peer_rejections.remove(&source);
-            sync_state.known_peers.insert(source);
-            sync_state.peer_hello.insert(source, hello);
-            (wire_version, software_version, reliable, pending_tx_ids)
+            sync_state
+                .peer_last_presence_seen_at
+                .insert(source, Instant::now());
+            sync_state.peer_node_info.insert(source, node_info);
+            (
+                wire_version,
+                software_version,
+                reliable,
+                pending_tx_ids,
+                newly_discovered,
+            )
         };
-        println!(
-            "Handshake accepted for {source} using wire v{wire_version} ({software_version}) [{}]",
-            if reliable { "reliable" } else { "discovered" }
-        );
+        if newly_discovered {
+            println!(
+                "Node info accepted for {source} using wire v{wire_version} ({software_version}) [{}]",
+                if reliable { "reliable" } else { "discovered" }
+            );
+        }
         for tx_id in pending_tx_ids {
             if !self.has_transaction(tx_id)? {
                 self.send_wire(
@@ -924,8 +983,8 @@ where
             ),
             Some(false) => Ok(()),
             None => {
-                let _ = self.send_wire(source, crate::wire::WireMessage::HelloRequest);
-                let _ = self.send_local_hello(source);
+                let _ = self.send_wire(source, crate::wire::WireMessage::PresenceAnnounce);
+                let _ = self.send_local_node_info(source);
                 Ok(())
             }
         }
@@ -1023,19 +1082,13 @@ where
             }
             sync_state.peer_rejections.get(&source).cloned()
         };
-        let _ = self.send_local_hello(source);
-        Err(rejection.unwrap_or_else(|| format!("peer {source} has not completed qcoin handshake")))
+        let _ = self.send_local_node_info(source);
+        Err(rejection
+            .unwrap_or_else(|| format!("peer {source} has not completed qcoin node-info exchange")))
     }
 
-    fn discovery_targets(&self) -> Vec<SocketAddr> {
-        let mut targets = self.discovery_targets.clone();
-        let sync_state = self.sync_state.lock().expect("sync state poisoned");
-        for peer in sync_state.known_peers.iter().copied() {
-            if !self.is_local_source(peer) && !targets.contains(&peer) {
-                targets.push(peer);
-            }
-        }
-        targets
+    fn bootstrap_targets(&self) -> Vec<SocketAddr> {
+        self.bootstrap_targets.clone()
     }
 
     fn known_peers(&self) -> Vec<SocketAddr> {
@@ -1048,13 +1101,13 @@ where
             .collect::<Vec<_>>();
         peers.sort_by(|left, right| {
             let left_reliable = sync_state
-                .peer_hello
+                .peer_node_info
                 .get(left)
-                .is_some_and(|hello| self.is_reliable_peer_key(&hello.node_public_key_hex));
+                .is_some_and(|node_info| self.is_reliable_peer_key(&node_info.node_public_key_hex));
             let right_reliable = sync_state
-                .peer_hello
+                .peer_node_info
                 .get(right)
-                .is_some_and(|hello| self.is_reliable_peer_key(&hello.node_public_key_hex));
+                .is_some_and(|node_info| self.is_reliable_peer_key(&node_info.node_public_key_hex));
             right_reliable
                 .cmp(&left_reliable)
                 .then_with(|| left.to_string().cmp(&right.to_string()))
