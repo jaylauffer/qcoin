@@ -46,19 +46,15 @@ Required tests:
 - verify no silent truncation or height mismatch remains
 
 ### 2. Add startup repair path
-Current risk:
-- startup refuses to continue if block history is shorter than chain height
-- no automated recovery path exists
+Current status:
+- startup now treats block history as authoritative local history
+- chain state is rebuilt or truncated to match block history on startup
+- malformed state/history files still stop startup explicitly instead of being ignored
 
-Tasks:
-- define repair policy for mismatched state/history files
-- choose whether to:
-  - rebuild state from blocks
-  - truncate state to known-good height
-  - stop with explicit repair command
-- implement and document the chosen behavior
+Documented behavior:
+- see [PERSISTENCE_MODEL.md](PERSISTENCE_MODEL.md)
 
-Required tests:
+Required regression tests:
 - state ahead of blocks
 - blocks ahead of state
 - corrupted history JSON

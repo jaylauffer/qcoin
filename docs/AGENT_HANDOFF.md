@@ -108,6 +108,9 @@ If the change touches node runtime behavior, also exercise a minimal run path su
 - unrecoverable partial writes
 - incompatible file layout without migration notes
 
+Current persistence policy is documented in [PERSISTENCE_MODEL.md](PERSISTENCE_MODEL.md).
+Block history is currently the authoritative local record; chain state is a rebuildable cache repaired from block history on startup.
+
 ### Peer sync assumptions
 Current long-running sync is simple UDP qcoin-wire replication driven by `loadngo-proactor` and `loadngo/network`, with a presence announce plus direct node-info exchange, optional multicast discovery, transaction announce/fetch over UDP, and no full fork resolution yet.
 Presence announce is separate from tip sync and should remain low-frequency. Current policy is a 42-second announce against bootstrap targets only, with direct node-info replies rate-limited to once every 42 seconds per source so multicast discovery does not degrade into peer-to-peer chatter.

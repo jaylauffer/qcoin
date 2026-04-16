@@ -228,6 +228,24 @@ impl<'de> Deserialize<'de> for PublicKey {
             {
                 PublicKey::from_bytes(v).map_err(DeError::custom)
             }
+
+            fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                PublicKey::from_bytes(&v).map_err(DeError::custom)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut bytes = Vec::new();
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    bytes.push(byte);
+                }
+                PublicKey::from_bytes(&bytes).map_err(DeError::custom)
+            }
         }
 
         deserializer.deserialize_bytes(PublicKeyVisitor)
@@ -264,6 +282,24 @@ impl<'de> Deserialize<'de> for PrivateKey {
             {
                 PrivateKey::from_bytes(v).map_err(DeError::custom)
             }
+
+            fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                PrivateKey::from_bytes(&v).map_err(DeError::custom)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut bytes = Vec::new();
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    bytes.push(byte);
+                }
+                PrivateKey::from_bytes(&bytes).map_err(DeError::custom)
+            }
         }
 
         deserializer.deserialize_bytes(PrivateKeyVisitor)
@@ -299,6 +335,24 @@ impl<'de> Deserialize<'de> for Signature {
                 E: DeError,
             {
                 Signature::from_bytes(v).map_err(DeError::custom)
+            }
+
+            fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                Signature::from_bytes(&v).map_err(DeError::custom)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut bytes = Vec::new();
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    bytes.push(byte);
+                }
+                Signature::from_bytes(&bytes).map_err(DeError::custom)
             }
         }
 
@@ -624,6 +678,23 @@ mod tests {
 
         let encoded_sig = sig.to_bytes().expect("signature encoding");
         let decoded_sig = Signature::from_bytes(&encoded_sig).expect("signature decoding");
+        assert_eq!(sig, decoded_sig);
+    }
+
+    #[test]
+    fn json_roundtrip_accepts_byte_array_encoding() {
+        let scheme = Dilithium2Scheme;
+        let (pk, sk) = scheme.keygen().expect("keygen should succeed");
+        let sig = scheme.sign(&sk, MESSAGE).expect("signing should succeed");
+
+        let encoded_pk = serde_json::to_string(&pk).expect("public key json encoding");
+        let decoded_pk: PublicKey =
+            serde_json::from_str(&encoded_pk).expect("public key json decoding");
+        assert_eq!(pk, decoded_pk);
+
+        let encoded_sig = serde_json::to_string(&sig).expect("signature json encoding");
+        let decoded_sig: Signature =
+            serde_json::from_str(&encoded_sig).expect("signature json decoding");
         assert_eq!(sig, decoded_sig);
     }
 }
