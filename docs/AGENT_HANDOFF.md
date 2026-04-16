@@ -98,6 +98,7 @@ If touching `deploy/`, verify that:
 Current operator runbooks:
 - [LAB_SERVICE_BOOTSTRAP.md](LAB_SERVICE_BOOTSTRAP.md) for the real three-node service-managed lab
 - [three-node-eab-workflow.md](three-node-eab-workflow.md) for the older generic three-node walkthrough
+- [ROLLOUT_POLICY.md](ROLLOUT_POLICY.md) for branch/deploy/promotion discipline
 
 ## Build and validation expectations
 
@@ -185,6 +186,7 @@ When handing off work, include:
 Do not assume the current mirroring behavior is the final contract.
 Read [QCOIN_EXIT_GATE.md](QCOIN_EXIT_GATE.md) before deciding qcoin bring-up work is complete enough to deprioritize.
 Current status: the live three-node lab passed the exit gate on `2026-04-16`; re-open it only if the cluster stops meeting those checks after further changes.
+Read [ROLLOUT_POLICY.md](ROLLOUT_POLICY.md) before pushing new node changes directly onto live lab machines.
 Read [EAB_ANCHOR_TRANSACTION_MODEL.md](EAB_ANCHOR_TRANSACTION_MODEL.md) first.
 If changing interaction between the two repos, document:
 - what EAB is allowed to submit
