@@ -29,15 +29,16 @@ Runtime artifacts are written under `data/` by default (`data/qcoin-chain-state.
 
 - UDP peer traffic is handled by the proactor-backed node core.
 - Static peers are resolved from `--peer` entries, and `http://...` peer URLs are still accepted for compatibility.
-- Optional IPv6 multicast discovery can be configured in `network-config.json`.
+- If you do not supply an explicit multicast config, the node now enables an embedded IPv6 multicast bootstrap profile on `ff02::5143:6f69:6e`.
 - Nodes exchange an explicit `HelloRequest` / `HelloResponse` handshake before normal UDP sync.
 - When a node is running normally, peer tip exchange and block propagation happen over the UDP qcoin wire protocol.
 - Multicast is used for discovery and bootstrap only; block sync and block propagation stay unicast after peers are learned.
+- Validator membership comes from a shared `cluster-manifest.json`, while `network-config.json` is now only for optional static peers and network overrides.
 - The HTTP API is still exposed as an adapter for inspection and compatibility tooling.
 
 HTTP endpoints:
 
-- `GET /node-info` -> node software version, qcoin wire version, compatibility floor, chain ID, and capability list
+- `GET /node-info` -> node software version, qcoin wire version, compatibility floor, chain ID, node public key, and capability list
 - `GET /tip` -> current tip metadata (`height`, `tip_hash_hex`, `state_root_hex`)
 - `GET /blocks/{height}` -> binary (`bincode`) encoded block for 1-based height
 - `POST /blocks` -> submit binary (`bincode`) encoded block
@@ -80,9 +81,10 @@ For a continuously running second node, the same `--peer` value will now be used
 - `--peer <url>` repeatable static peer list (example: `http://127.0.0.1:9710` or `127.0.0.1:9710`)
 - `--listen <addr>` shared HTTP/UDP bind address
 - `--sync-interval-seconds <n>` periodic UDP tip-sync interval for the live node core
-- `--produce=<true|false>` whether this node proposes local empty blocks
-- `--network-config-json <path>` JSON file containing peer URLs, validator public keys, and optional multicast discovery settings
-- `--validator-public-key-hex <hex>` validator set entries for signature/proposer checks
+- `--produce=<true|false>` explicit role override; if omitted, the node auto-produces only when its local key is in the manifest validator set
+- `--cluster-manifest-json <path>` shared chain/bootstrap manifest containing `chain_id`, validator public keys, reliable node keys, and multicast settings
+- `--network-config-json <path>` optional static peer and network override file
+- `--validator-public-key-hex <hex>` legacy validator-set fallback when no manifest is supplied
 - `--keypair-json <path>` signer keypair file from `keygen`
 - `--blocks-path <path>` explicit block history persistence path
 
@@ -93,6 +95,7 @@ The repo contains deploy artifacts for running `qcoin-node` as a boot-time servi
 - `deploy/qcoin-node.service`
 - `deploy/qcoin-node-launch.sh`
 - `deploy/qcoin-node.env.example`
+- `deploy/cluster-manifest.example.json`
 - `deploy/network-config.10.10.10.1.example.json`
 - `deploy/render-node-config.sh`
 
@@ -103,7 +106,8 @@ The recommended layout on a machine is:
 - `/etc/systemd/system/qcoin-node.service`
 - `/usr/local/bin/qcoin-node-launch.sh`
 - `/etc/qcoin/qcoin-node.env`
-- `/etc/qcoin/network-config.json`
+- `/etc/qcoin/cluster-manifest.json`
+- `/etc/qcoin/network-config.json` only when you want static peers
 - `/etc/qcoin/node-keypair.json`
 - `/var/lib/qcoin/` for chain state and blocks
 - `/var/log/qcoin/` for service logs
@@ -130,37 +134,44 @@ sudo install -m 0644 deploy/qcoin-node.service /etc/systemd/system/qcoin-node.se
 
 ### 3. Create the node keypair JSON
 
-Generate one keypair per machine:
+You can pre-generate one keypair per machine:
 
 ```bash
 ./target/release/qcoin-node keygen > /tmp/node-keypair.json
 sudo install -m 0600 /tmp/node-keypair.json /etc/qcoin/node-keypair.json
 ```
 
-Capture the `public_key_hex` from each machine. All nodes must use the same validator set.
+If `/etc/qcoin/node-keypair.json` is missing at startup, `qcoin-node` now generates and persists one automatically.
 
-### 4. Create `/etc/qcoin/network-config.json`
+Capture the `public_key_hex` from each bootstrap validator. All nodes in the same cluster must share the same manifest validator set and ordering.
 
-This file is the source of truth for peers, validator public keys, and optional multicast discovery.
-You can keep explicit `peers`, rely on multicast discovery, or use both.
+### 4. Create `/etc/qcoin/cluster-manifest.json`
 
-Example for machine `10.10.10.1`:
+This file is now the shared source of truth for:
+
+- `chain_id`
+- bootstrap validator public keys
+- optional reliable node public keys
+- multicast discovery settings
+
+Example:
 
 ```json
 {
-  "peers": [
-    "http://10.10.10.2:9700",
-    "http://10.10.10.3:9700"
-  ],
+  "chain_id": 0,
   "validator_public_key_hex": [
+    "PUBKEY_FOR_10_10_10_1",
+    "PUBKEY_FOR_10_10_10_2",
+    "PUBKEY_FOR_10_10_10_3"
+  ],
+  "reliable_node_public_key_hex": [
     "PUBKEY_FOR_10_10_10_1",
     "PUBKEY_FOR_10_10_10_2",
     "PUBKEY_FOR_10_10_10_3"
   ],
   "multicast_v6": [
     {
-      "group": "ff02::5143:6f69:6e",
-      "interface": 2
+      "group": "ff02::5143:6f69:6e"
     }
   ]
 }
@@ -169,12 +180,33 @@ Example for machine `10.10.10.1`:
 Install it:
 
 ```bash
+sudo install -m 0644 deploy/cluster-manifest.example.json /etc/qcoin/cluster-manifest.json
+```
+
+Then edit `/etc/qcoin/cluster-manifest.json` and replace the placeholder validator keys with the real `public_key_hex` values. If `interface` is omitted, `qcoin-node` auto-discovers multicast-capable IPv6 interfaces on Unix platforms. Set it explicitly if you want to pin discovery to one NIC.
+
+### 5. Optional: create `/etc/qcoin/network-config.json`
+
+This file is now optional. Use it only when you want static peers or explicit network overrides in addition to multicast discovery.
+
+Example:
+
+```json
+{
+  "peers": [
+    "http://10.10.10.2:9700",
+    "http://10.10.10.3:9700"
+  ]
+}
+```
+
+Install it only if you need it:
+
+```bash
 sudo install -m 0644 deploy/network-config.10.10.10.1.example.json /etc/qcoin/network-config.json
 ```
 
-Then edit `/etc/qcoin/network-config.json` and replace the placeholder validator keys with the real `public_key_hex` values. If you want LAN discovery over IPv6 multicast, keep the `multicast_v6` entry and set `interface` to the local NIC index, for example from `ip -6 link show`.
-
-### 5. Create `/etc/qcoin/qcoin-node.env`
+### 6. Create `/etc/qcoin/qcoin-node.env`
 
 Example for machine `10.10.10.1`:
 
@@ -186,10 +218,9 @@ QCOIN_BLOCKS_PATH=/var/lib/qcoin/qcoin-blocks.json
 QCOIN_LISTEN=10.10.10.1:9700
 QCOIN_INTERVAL_SECONDS=5
 QCOIN_SYNC_INTERVAL_SECONDS=3
-QCOIN_PRODUCE=true
 QCOIN_SCHEME=dilithium2
 QCOIN_KEYPAIR_JSON=/etc/qcoin/node-keypair.json
-QCOIN_NETWORK_CONFIG_JSON=/etc/qcoin/network-config.json
+QCOIN_CLUSTER_MANIFEST_JSON=/etc/qcoin/cluster-manifest.json
 ```
 
 You can start from the template:
@@ -200,14 +231,18 @@ sudo install -m 0644 deploy/qcoin-node.env.example /etc/qcoin/qcoin-node.env
 
 Then edit `/etc/qcoin/qcoin-node.env` for the local machine.
 
-### 6. Reload and start the service
+Only set `QCOIN_PRODUCE=true` if you want to override the default role selection. If it is unset, a node produces only when its local public key appears in the manifest validator set.
+
+Add `QCOIN_NETWORK_CONFIG_JSON=/etc/qcoin/network-config.json` only if you installed the optional static-peer file.
+
+### 7. Reload and start the service
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now qcoin-node.service
 ```
 
-### 7. Inspect logs and status
+### 8. Inspect logs and status
 
 ```bash
 systemctl --no-pager --full status qcoin-node.service
@@ -216,13 +251,15 @@ tail -f /var/log/qcoin/node.log
 tail -f /var/log/qcoin/node.err
 ```
 
-### 8. Multi-node requirements
+### 9. Multi-node requirements
 
 - Each machine needs its own `/etc/qcoin/node-keypair.json`.
 - Each machine should have a machine-specific `/etc/qcoin/qcoin-node.env` with its own `QCOIN_LISTEN`.
-- Each machine should have a machine-specific `/etc/qcoin/network-config.json` with its peers listed appropriately, or an intentional multicast-only discovery setup.
-- If you enable `multicast_v6`, use the same multicast group on every node and the correct local interface index on each machine.
-- The `validator_public_key_hex` array must be identical across all three machines.
+- Every machine in the cluster should have the same `/etc/qcoin/cluster-manifest.json`.
+- `/etc/qcoin/network-config.json` is optional and machine-specific when used.
+- If you keep `multicast_v6`, use the same multicast group on every node. Leaving `interface` unset lets Unix nodes auto-detect multicast-capable interfaces.
+- The `validator_public_key_hex` array in the cluster manifest must be identical across all machines, in the same order.
+- The `reliable_node_public_key_hex` list is advisory for bootstrap/sync preference; it does not grant validator rights.
 - Peer URLs should point at reachable private addresses such as `http://10.10.10.x:9700`.
 
 ## Roadmap

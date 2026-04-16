@@ -60,6 +60,7 @@ pub struct CoreConfig {
     pub sync_interval: Duration,
     pub produce_interval: Duration,
     pub produce: bool,
+    pub reliable_node_public_key_hex: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -356,6 +357,7 @@ where
     sync_interval: Duration,
     produce_interval: Duration,
     produce_enabled: bool,
+    reliable_node_public_key_hex: HashSet<String>,
     handle: ProactorHandle<P>,
     sync_state: Mutex<SyncState>,
     cleanup: Mutex<Option<CleanupCallback>>,
@@ -389,6 +391,7 @@ where
             sync_interval: config.sync_interval,
             produce_interval: config.produce_interval,
             produce_enabled: config.produce,
+            reliable_node_public_key_hex: config.reliable_node_public_key_hex.into_iter().collect(),
             handle,
             sync_state: Mutex::new(sync_state),
             cleanup: Mutex::new(None),
@@ -434,6 +437,7 @@ where
             sync_interval: config.sync_interval,
             produce_interval: config.produce_interval,
             produce_enabled: config.produce,
+            reliable_node_public_key_hex: config.reliable_node_public_key_hex.into_iter().collect(),
             handle,
             sync_state: Mutex::new(sync_state),
             cleanup: Mutex::new(Some(Box::new(move || {
@@ -792,6 +796,9 @@ where
             crate::wire::local_node_hello(
                 runtime.chain.chain_id,
                 !self.network.config().multicast.is_empty(),
+                runtime.node_public_key_hex.clone(),
+                runtime.node_is_validator,
+                self.produce_enabled,
             )
         })
     }
@@ -815,10 +822,15 @@ where
         let mut sync_state = self.sync_state.lock().expect("sync state poisoned");
         let wire_version = hello.wire_version;
         let software_version = hello.software_version.clone();
+        let peer_key = hello.node_public_key_hex.clone();
+        let reliable = self.is_reliable_peer_key(&peer_key);
         sync_state.peer_rejections.remove(&source);
         sync_state.known_peers.insert(source);
         sync_state.peer_hello.insert(source, hello);
-        println!("Handshake accepted for {source} using wire v{wire_version} ({software_version})");
+        println!(
+            "Handshake accepted for {source} using wire v{wire_version} ({software_version}) [{}]",
+            if reliable { "reliable" } else { "discovered" }
+        );
         Ok(())
     }
 
@@ -847,12 +859,26 @@ where
 
     fn known_peers(&self) -> Vec<SocketAddr> {
         let sync_state = self.sync_state.lock().expect("sync state poisoned");
-        sync_state
+        let mut peers = sync_state
             .known_peers
             .iter()
             .copied()
             .filter(|peer| !self.is_local_source(*peer))
-            .collect()
+            .collect::<Vec<_>>();
+        peers.sort_by(|left, right| {
+            let left_reliable = sync_state
+                .peer_hello
+                .get(left)
+                .is_some_and(|hello| self.is_reliable_peer_key(&hello.node_public_key_hex));
+            let right_reliable = sync_state
+                .peer_hello
+                .get(right)
+                .is_some_and(|hello| self.is_reliable_peer_key(&hello.node_public_key_hex));
+            right_reliable
+                .cmp(&left_reliable)
+                .then_with(|| left.to_string().cmp(&right.to_string()))
+        });
+        peers
     }
 
     fn is_local_source(&self, source: SocketAddr) -> bool {
@@ -861,6 +887,10 @@ where
 
     fn current_chain_id(&self) -> Result<u32, String> {
         self.with_runtime(|runtime| runtime.chain.chain_id)
+    }
+
+    fn is_reliable_peer_key(&self, public_key_hex: &str) -> bool {
+        self.reliable_node_public_key_hex.contains(public_key_hex)
     }
 
     fn with_runtime<T>(&self, f: impl FnOnce(&NodeRuntime) -> T) -> Result<T, String> {
@@ -1003,6 +1033,7 @@ mod tests {
                 sync_interval: Duration::from_secs(30),
                 produce_interval: Duration::from_secs(30),
                 produce: false,
+                reliable_node_public_key_hex: Vec::new(),
             },
             handle_a.clone(),
             Duration::from_millis(2),
@@ -1023,6 +1054,7 @@ mod tests {
                 sync_interval: Duration::from_secs(30),
                 produce_interval: Duration::from_secs(30),
                 produce: false,
+                reliable_node_public_key_hex: Vec::new(),
             },
             handle_b.clone(),
             Duration::from_millis(2),
@@ -1084,6 +1116,7 @@ mod tests {
         let blocks = load_block_history(&blocks_path).unwrap_or_default();
 
         let registry = default_registry();
+        let node_public_key_hex = crate::to_hex(&signer.public_key.bytes);
         let consensus = DummyConsensusEngine::from_keys(
             registry,
             signer.public_key,
@@ -1109,6 +1142,8 @@ mod tests {
             script_engine: DeterministicScriptEngine::default(),
             state_path,
             blocks_path,
+            node_public_key_hex,
+            node_is_validator: true,
         })
     }
 
@@ -1129,6 +1164,7 @@ mod tests {
             Ok(keys) => keys,
             Err(err) => return Err(err.to_string()),
         };
+        let node_public_key_hex = crate::to_hex(&public_key.bytes);
         let consensus =
             DummyConsensusEngine::from_keys(registry, public_key, private_key, validators)
                 .map_err(|err| err.to_string())?;
@@ -1150,6 +1186,8 @@ mod tests {
             script_engine: DeterministicScriptEngine::default(),
             state_path,
             blocks_path,
+            node_public_key_hex,
+            node_is_validator: false,
         })
     }
 }

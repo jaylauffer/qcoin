@@ -1,0 +1,18 @@
+{
+  "chain_id": 0,
+  "validator_public_key_hex": [
+    "REPLACE_WITH_10_10_10_1_PUBLIC_KEY_HEX",
+    "REPLACE_WITH_10_10_10_2_PUBLIC_KEY_HEX",
+    "REPLACE_WITH_10_10_10_3_PUBLIC_KEY_HEX"
+  ],
+  "reliable_node_public_key_hex": [
+    "REPLACE_WITH_10_10_10_1_PUBLIC_KEY_HEX",
+    "REPLACE_WITH_10_10_10_2_PUBLIC_KEY_HEX",
+    "REPLACE_WITH_10_10_10_3_PUBLIC_KEY_HEX"
+  ],
+  "multicast_v6": [
+    {
+      "group": "ff02::5143:6f69:6e"
+    }
+  ]
+}

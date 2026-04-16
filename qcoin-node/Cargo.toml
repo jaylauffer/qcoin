@@ -23,6 +23,7 @@ bincode.workspace = true
 tiny_http.workspace = true
 ureq.workspace = true
 ctrlc.workspace = true
+libc.workspace = true
 loadngo-proactor = { path = "../../loadngo/proactor" }
 network = { path = "../../loadngo/network" }
 
