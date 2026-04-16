@@ -50,6 +50,7 @@ use std::time::{Duration, Instant};
 const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const PRESENCE_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(42);
 const NODE_INFO_RESPONSE_MIN_INTERVAL: Duration = Duration::from_secs(42);
+const NODE_INFO_PROBE_MIN_INTERVAL: Duration = Duration::from_secs(5);
 #[cfg(unix)]
 const READINESS_TOKEN_BASE: u64 = 0x51434f49_4e5f4e45;
 
@@ -76,6 +77,7 @@ struct SyncState {
     pending_transaction_announcements: HashMap<SocketAddr, HashSet<Hash256>>,
     peer_last_presence_seen_at: HashMap<SocketAddr, Instant>,
     peer_last_node_info_sent_at: HashMap<SocketAddr, Instant>,
+    peer_last_node_info_probe_at: HashMap<SocketAddr, Instant>,
 }
 
 impl SyncState {
@@ -89,6 +91,7 @@ impl SyncState {
             pending_transaction_announcements: HashMap::new(),
             peer_last_presence_seen_at: HashMap::new(),
             peer_last_node_info_sent_at: HashMap::new(),
+            peer_last_node_info_probe_at: HashMap::new(),
         }
     }
 }
@@ -615,7 +618,9 @@ where
                 self.handle_node_info(source, node_info)
             }
             crate::wire::WireMessage::TipRequest => {
-                self.ensure_compatible_peer(source)?;
+                if !self.ensure_compatible_peer(source)? {
+                    return Ok(());
+                }
                 self.send_wire(
                     source,
                     crate::wire::WireMessage::TipResponse(self.tip_snapshot()?),
@@ -623,7 +628,9 @@ where
             }
             crate::wire::WireMessage::TipResponse(tip) => self.handle_tip_response(source, tip),
             crate::wire::WireMessage::BlockRequest { height } => {
-                self.ensure_compatible_peer(source)?;
+                if !self.ensure_compatible_peer(source)? {
+                    return Ok(());
+                }
                 let block = self.block_at_height(height)?;
                 self.send_wire(
                     source,
@@ -634,7 +641,9 @@ where
                 self.handle_block_response(source, height, block)
             }
             crate::wire::WireMessage::SubmitBlock { block } => {
-                self.ensure_compatible_peer(source)?;
+                if !self.ensure_compatible_peer(source)? {
+                    return Ok(());
+                }
                 let response = match self.apply_remote_block(block) {
                     Ok(height) => SubmitBlockResponse {
                         accepted: true,
@@ -665,7 +674,6 @@ where
                 self.handle_transaction_announce(source, tx_id)
             }
             crate::wire::WireMessage::TransactionRequest { tx_id } => {
-                self.ensure_compatible_peer(source)?;
                 self.handle_transaction_request(source, tx_id)
             }
             crate::wire::WireMessage::TransactionResponse { tx_id, transaction } => {
@@ -687,7 +695,9 @@ where
     }
 
     fn handle_tip_response(&self, source: SocketAddr, tip: TipResponse) -> Result<(), String> {
-        self.ensure_compatible_peer(source)?;
+        if !self.ensure_compatible_peer(source)? {
+            return Ok(());
+        }
         {
             let mut sync_state = self.sync_state.lock().expect("sync state poisoned");
             sync_state.peer_tip_heights.insert(source, tip.height);
@@ -701,7 +711,9 @@ where
         height: u64,
         block: Option<Block>,
     ) -> Result<(), String> {
-        self.ensure_compatible_peer(source)?;
+        if !self.ensure_compatible_peer(source)? {
+            return Ok(());
+        }
         {
             let mut sync_state = self.sync_state.lock().expect("sync state poisoned");
             sync_state.in_flight_blocks.remove(&source);
@@ -769,7 +781,12 @@ where
 
     fn broadcast_presence_announces(&self) -> Result<(), String> {
         for target in self.bootstrap_targets() {
-            self.send_wire(target, crate::wire::WireMessage::PresenceAnnounce)?;
+            if let Err(err) = self.send_wire(target, crate::wire::WireMessage::PresenceAnnounce) {
+                if self.should_ignore_bootstrap_send_error(target, &err) {
+                    continue;
+                }
+                return Err(err);
+            }
         }
         Ok(())
     }
@@ -783,10 +800,15 @@ where
 
     fn broadcast_transaction_announce(&self, tx_id: Hash256) -> Result<(), String> {
         for target in self.bootstrap_targets() {
-            self.send_wire(
+            if let Err(err) = self.send_wire(
                 target,
                 crate::wire::WireMessage::TransactionAnnounce { tx_id },
-            )?;
+            ) {
+                if self.should_ignore_bootstrap_send_error(target, &err) {
+                    continue;
+                }
+                return Err(err);
+            }
         }
         Ok(())
     }
@@ -925,6 +947,7 @@ where
             sync_state
                 .peer_last_presence_seen_at
                 .insert(source, Instant::now());
+            sync_state.peer_last_node_info_probe_at.remove(&source);
             sync_state.peer_node_info.insert(source, node_info);
             (
                 wire_version,
@@ -983,14 +1006,16 @@ where
             ),
             Some(false) => Ok(()),
             None => {
-                let _ = self.send_wire(source, crate::wire::WireMessage::PresenceAnnounce);
-                let _ = self.send_local_node_info(source);
+                let _ = self.request_node_info_exchange(source);
                 Ok(())
             }
         }
     }
 
     fn handle_transaction_request(&self, source: SocketAddr, tx_id: Hash256) -> Result<(), String> {
+        if !self.ensure_compatible_peer(source)? {
+            return Ok(());
+        }
         let transaction = self.transaction_by_id(tx_id)?;
         self.send_wire(
             source,
@@ -1004,7 +1029,9 @@ where
         tx_id: Hash256,
         transaction: Option<Transaction>,
     ) -> Result<(), String> {
-        self.ensure_compatible_peer(source)?;
+        if !self.ensure_compatible_peer(source)? {
+            return Ok(());
+        }
         let Some(transaction) = transaction else {
             return Ok(());
         };
@@ -1074,17 +1101,19 @@ where
         Ok(())
     }
 
-    fn ensure_compatible_peer(&self, source: SocketAddr) -> Result<(), String> {
+    fn ensure_compatible_peer(&self, source: SocketAddr) -> Result<bool, String> {
         let rejection = {
             let sync_state = self.sync_state.lock().expect("sync state poisoned");
             if sync_state.known_peers.contains(&source) {
-                return Ok(());
+                return Ok(true);
             }
             sync_state.peer_rejections.get(&source).cloned()
         };
-        let _ = self.send_local_node_info(source);
-        Err(rejection
-            .unwrap_or_else(|| format!("peer {source} has not completed qcoin node-info exchange")))
+        if let Some(rejection) = rejection {
+            return Err(rejection);
+        }
+        let _ = self.request_node_info_exchange(source);
+        Ok(false)
     }
 
     fn bootstrap_targets(&self) -> Vec<SocketAddr> {
@@ -1174,6 +1203,38 @@ where
             .lock()
             .map_err(|err| format!("failed to lock qcoin runtime: {err}"))?;
         f(&mut runtime)
+    }
+
+    fn request_node_info_exchange(&self, source: SocketAddr) -> Result<(), String> {
+        let should_probe = {
+            let mut sync_state = self.sync_state.lock().expect("sync state poisoned");
+            let now = Instant::now();
+            sync_state.peer_last_presence_seen_at.insert(source, now);
+            sync_state
+                .peer_last_node_info_probe_at
+                .get(&source)
+                .is_none_or(|last| now.duration_since(*last) >= NODE_INFO_PROBE_MIN_INTERVAL)
+                .then(|| {
+                    sync_state.peer_last_node_info_probe_at.insert(source, now);
+                })
+                .is_some()
+        };
+        if !should_probe {
+            return Ok(());
+        }
+        let _ = self.send_wire(source, crate::wire::WireMessage::PresenceAnnounce);
+        self.send_local_node_info(source)
+    }
+
+    fn should_ignore_bootstrap_send_error(&self, target: SocketAddr, err: &str) -> bool {
+        target.ip().is_multicast()
+            && [
+                "No route to host",
+                "Network is unreachable",
+                "Host is unreachable",
+            ]
+            .iter()
+            .any(|needle| err.contains(needle))
     }
 }
 

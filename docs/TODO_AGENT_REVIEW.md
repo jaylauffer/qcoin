@@ -183,6 +183,9 @@ Tasks:
 - confirm example configs match actual runtime flags
 - add minimal operator runbook
 
+Current operator note:
+- [LAB_SERVICE_BOOTSTRAP.md](LAB_SERVICE_BOOTSTRAP.md)
+
 ## QCoin + EAB integration tasks
 
 ### 11. Stabilize remote block submission expectations

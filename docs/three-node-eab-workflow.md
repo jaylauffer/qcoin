@@ -155,8 +155,8 @@ Run the EAB service on the most trusted machine first. In this lab, `10.10.10.1`
 cd ../entitlement-achievement-blockchain
 LEDGER_BACKEND=qcoin \
 LEDGER_TOPICS_PATH=player_logs \
-QCOIN_STATE_PATH=qcoin_chain_state.json \
-QCOIN_NODE_URL=http://10.10.10.1:9700 \
+QCOIN_OUTBOX_PATH=qcoin_anchor_outbox.json \
+QCOIN_NODE_TARGET=10.10.10.1:9700 \
 BIND_IP=10.10.10.1 \
 BIND_PORT=8080 \
 cargo run --manifest-path rust/Cargo.toml
@@ -164,7 +164,7 @@ cargo run --manifest-path rust/Cargo.toml
 
 Important detail:
 
-- EAB only needs one reachable `QCOIN_NODE_URL`.
+- EAB only needs one reachable `QCOIN_NODE_TARGET`.
 - QCoin peer sync handles propagation to the rest of the cluster.
 - For development, point EAB at a producer node, not the observer.
 

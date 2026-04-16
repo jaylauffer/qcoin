@@ -280,11 +280,12 @@ Definition of done:
 Result:
 - documented in `docs/QCOIN_EXIT_GATE.md`
 - the qcoin-to-EAB focus shift is now an explicit lab decision, not a vague judgment call
+- the current three-node service-managed lab passed the gate on `2026-04-16`
 
 ---
 
 ## QW-015 Deployment/runbook cleanup
-Status: `todo`
+Status: `done`
 
 Goal:
 - make deployment assets trustworthy for repeatable bring-up
@@ -296,6 +297,11 @@ Tasks:
 
 Definition of done:
 - docs allow a clean bring-up without source spelunking
+
+Result:
+- launcher now supports both `systemd` `EnvironmentFile` usage and `launchd` via `QCOIN_ENV_FILE`
+- Linux `systemd` and macOS `launchd` example assets now exist under `deploy/`
+- the current three-node lab service bootstrap is documented in `docs/LAB_SERVICE_BOOTSTRAP.md`
 
 ---
 

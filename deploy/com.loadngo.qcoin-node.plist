@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.loadngo.qcoin-node</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/jay/pudding/qcoin/deploy/qcoin-node-launch.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>QCOIN_ENV_FILE</key>
+    <string>/Users/jay/.config/qcoin/qcoin-node.env</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/jay/pudding/qcoin</string>
+
+  <key>StandardOutPath</key>
+  <string>/Users/jay/Library/Logs/qcoin/node.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/jay/Library/Logs/qcoin/node.err</string>
+</dict>
+</plist>
