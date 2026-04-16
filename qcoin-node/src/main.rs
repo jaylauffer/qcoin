@@ -4,11 +4,12 @@ mod wire;
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use qcoin_consensus::{ConsensusEngine, DummyConsensusEngine};
 use qcoin_crypto::{default_registry, PqSchemeRegistry, PrivateKey, PublicKey, SignatureSchemeId};
-use qcoin_ledger::{ChainState, LedgerState};
+use qcoin_ledger::{ChainState, LedgerState, TrackedOutput, UtxoKey};
 use qcoin_script::DeterministicScriptEngine;
-use qcoin_types::{Block, Hash256, Transaction};
+use qcoin_types::{AssetDefinition, AssetId, Block, Hash256, Transaction};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     ffi::OsString,
     fs::{self, File},
     io::{Read, Write},
@@ -190,6 +191,34 @@ struct NodeRuntime {
     node_public_key_hex: String,
     node_is_validator: bool,
     produce_empty_blocks: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedUtxoEntry {
+    key: UtxoKey,
+    tracked_output: TrackedOutput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedAssetEntry {
+    asset_id: AssetId,
+    definition: AssetDefinition,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedLedgerState {
+    utxos: Vec<PersistedUtxoEntry>,
+    assets: Vec<PersistedAssetEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedChainState {
+    ledger: PersistedLedgerState,
+    height: u64,
+    tip_hash: Hash256,
+    state_root: Hash256,
+    last_timestamp: u64,
+    chain_id: u32,
 }
 
 enum TransactionAcceptStatus {
@@ -1380,6 +1409,86 @@ fn default_chain_state_with_id(chain_id: u32) -> ChainState {
     }
 }
 
+impl From<&ChainState> for PersistedChainState {
+    fn from(chain: &ChainState) -> Self {
+        let mut utxos = chain
+            .ledger
+            .utxos
+            .iter()
+            .map(|(key, tracked_output)| PersistedUtxoEntry {
+                key: key.clone(),
+                tracked_output: tracked_output.clone(),
+            })
+            .collect::<Vec<_>>();
+        utxos.sort_by(|left, right| {
+            left.key
+                .tx_id
+                .cmp(&right.key.tx_id)
+                .then_with(|| left.key.index.cmp(&right.key.index))
+        });
+
+        let mut assets = chain
+            .ledger
+            .assets
+            .iter()
+            .map(|(asset_id, definition)| PersistedAssetEntry {
+                asset_id: asset_id.clone(),
+                definition: definition.clone(),
+            })
+            .collect::<Vec<_>>();
+        assets.sort_by(|left, right| left.asset_id.0.cmp(&right.asset_id.0));
+
+        Self {
+            ledger: PersistedLedgerState { utxos, assets },
+            height: chain.height,
+            tip_hash: chain.tip_hash,
+            state_root: chain.state_root,
+            last_timestamp: chain.last_timestamp,
+            chain_id: chain.chain_id,
+        }
+    }
+}
+
+impl PersistedChainState {
+    fn into_chain_state(self) -> Result<ChainState, String> {
+        let mut utxos = HashMap::with_capacity(self.ledger.utxos.len());
+        for entry in self.ledger.utxos {
+            if utxos
+                .insert(entry.key.clone(), entry.tracked_output)
+                .is_some()
+            {
+                return Err(format!(
+                    "duplicate UTXO entry in persisted chain state for tx {} index {}",
+                    to_hex(&entry.key.tx_id),
+                    entry.key.index
+                ));
+            }
+        }
+
+        let mut assets = HashMap::with_capacity(self.ledger.assets.len());
+        for entry in self.ledger.assets {
+            if assets
+                .insert(entry.asset_id.clone(), entry.definition)
+                .is_some()
+            {
+                return Err(format!(
+                    "duplicate asset entry in persisted chain state for asset {}",
+                    to_hex(&entry.asset_id.0)
+                ));
+            }
+        }
+
+        Ok(ChainState {
+            ledger: LedgerState { utxos, assets },
+            height: self.height,
+            tip_hash: self.tip_hash,
+            state_root: self.state_root,
+            last_timestamp: self.last_timestamp,
+            chain_id: self.chain_id,
+        })
+    }
+}
+
 #[cfg(test)]
 fn load_or_initialize_chain_state(
     path: &Path,
@@ -1492,13 +1601,26 @@ fn load_chain_state(path: &Path) -> Result<Option<ChainState>, String> {
     let mut contents = String::new();
     file.read_to_string(&mut contents)
         .map_err(|err| format!("failed to read chain state {}: {err}", path.display()))?;
-    serde_json::from_str::<ChainState>(&contents)
-        .map(Some)
-        .map_err(|err| format!("failed to parse chain state {}: {err}", path.display()))
+
+    match serde_json::from_str::<PersistedChainState>(&contents) {
+        Ok(snapshot) => snapshot
+            .into_chain_state()
+            .map(Some)
+            .map_err(|err| format!("failed to parse chain state {}: {err}", path.display())),
+        Err(snapshot_err) => serde_json::from_str::<ChainState>(&contents)
+            .map(Some)
+            .map_err(|legacy_err| {
+                format!(
+                    "failed to parse chain state {}: snapshot format error: {snapshot_err}; legacy format error: {legacy_err}",
+                    path.display()
+                )
+            }),
+    }
 }
 
 fn save_chain_state(path: &Path, chain: &ChainState) -> Result<(), String> {
-    let state = serde_json::to_string_pretty(chain).map_err(|err| err.to_string())?;
+    let state = serde_json::to_string_pretty(&PersistedChainState::from(chain))
+        .map_err(|err| err.to_string())?;
     write_file_atomically(path, state.as_bytes())
 }
 
@@ -1633,7 +1755,10 @@ mod tests {
         ChainState,
     };
     use qcoin_consensus::{ConsensusEngine, DummyConsensusEngine};
+    use qcoin_ledger::{TrackedOutput, UtxoKey};
     use qcoin_script::DeterministicScriptEngine;
+    use qcoin_types::{AssetAmount, AssetDefinition, AssetId, AssetKind, Output};
+    use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use tempfile::tempdir;
 
@@ -1777,6 +1902,63 @@ mod tests {
         let repaired = load_chain_state(&state_path).unwrap().unwrap();
         assert_eq!(repaired.height, 0);
         assert_eq!(repaired.tip_hash, [0u8; 32]);
+    }
+
+    #[test]
+    fn save_chain_state_round_trips_non_empty_ledger_maps() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+
+        let mut chain = default_chain_state();
+        chain.height = 2;
+        chain.tip_hash = [9u8; 32];
+        chain.state_root = [7u8; 32];
+        chain.last_timestamp = 42;
+
+        let mut utxos = HashMap::new();
+        utxos.insert(
+            UtxoKey {
+                tx_id: [3u8; 32],
+                index: 1,
+            },
+            TrackedOutput {
+                output: Output {
+                    owner_script_hash: [4u8; 32],
+                    assets: vec![AssetAmount {
+                        asset_id: AssetId([5u8; 32]),
+                        amount: 10,
+                    }],
+                    metadata_hash: None,
+                },
+                created_height: 2,
+            },
+        );
+
+        let mut assets = HashMap::new();
+        assets.insert(
+            AssetId([5u8; 32]),
+            AssetDefinition {
+                issuer_script_hash: [6u8; 32],
+                metadata_root: [8u8; 32],
+                max_supply: Some(99),
+                decimals: 2,
+                kind: AssetKind::Fungible,
+            },
+        );
+
+        chain.ledger.utxos = utxos;
+        chain.ledger.assets = assets;
+
+        save_chain_state(&state_path, &chain).unwrap();
+
+        let reloaded = load_chain_state(&state_path).unwrap().unwrap();
+        assert_eq!(reloaded.height, chain.height);
+        assert_eq!(reloaded.tip_hash, chain.tip_hash);
+        assert_eq!(reloaded.state_root, chain.state_root);
+        assert_eq!(reloaded.last_timestamp, chain.last_timestamp);
+        assert_eq!(reloaded.chain_id, chain.chain_id);
+        assert_eq!(reloaded.ledger.utxos, chain.ledger.utxos);
+        assert_eq!(reloaded.ledger.assets, chain.ledger.assets);
     }
 
     #[test]
