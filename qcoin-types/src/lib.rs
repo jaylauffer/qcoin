@@ -30,6 +30,28 @@ pub enum AssetKind {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AssetId(pub Hash256);
 
+const fn qcoin_asset_id_bytes() -> Hash256 {
+    let mut bytes = [0u8; 32];
+    bytes[0] = b'l';
+    bytes[1] = b'o';
+    bytes[2] = b'a';
+    bytes[3] = b'd';
+    bytes[4] = b'n';
+    bytes[5] = b'g';
+    bytes[6] = b'o';
+    bytes
+}
+
+/// Reserved native asset identifier for QCOIN.
+///
+/// The value is the ASCII literal `loadngo` zero-padded to 32 bytes so it is
+/// stable, human-recognizable, and distinct from derived user asset IDs.
+pub const QCOIN_ASSET_ID: AssetId = AssetId(qcoin_asset_id_bytes());
+
+pub fn is_qcoin_asset_id(asset_id: &AssetId) -> bool {
+    asset_id.0 == QCOIN_ASSET_ID.0
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetDefinition {
     pub issuer_script_hash: Hash256,
@@ -378,7 +400,15 @@ mod tests {
             .first()
             .expect("minted asset amount should be present");
         assert_eq!(minted_asset.asset_id, asset_id);
+        assert!(!is_qcoin_asset_id(&asset_id));
         assert_eq!(minted_asset.amount, initial_supply);
         assert!(minted_output.metadata_hash.is_none());
+    }
+
+    #[test]
+    fn qcoin_asset_id_is_loadngo_ascii_padded() {
+        assert_eq!(&QCOIN_ASSET_ID.0[..7], b"loadngo");
+        assert!(QCOIN_ASSET_ID.0[7..].iter().all(|byte| *byte == 0));
+        assert!(is_qcoin_asset_id(&QCOIN_ASSET_ID));
     }
 }

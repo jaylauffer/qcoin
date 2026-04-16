@@ -4,8 +4,8 @@ use qcoin_script::{
     consensus_codec as script_codec, ResolvedInput, Script, ScriptContext, ScriptEngine, ScriptHost,
 };
 use qcoin_types::{
-    consensus_codec, derive_asset_id, AssetAmount, AssetDefinition, AssetId, Block, Hash256,
-    Output, Transaction, TransactionKind,
+    consensus_codec, derive_asset_id, is_qcoin_asset_id, AssetAmount, AssetDefinition, AssetId,
+    Block, Hash256, Output, Transaction, TransactionKind,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -60,6 +60,8 @@ pub enum LedgerError {
     AssetConservationViolation,
     #[error("asset already exists")]
     AssetAlreadyExists,
+    #[error("native QCOIN asset ID is reserved and cannot be created via CreateAsset")]
+    ReservedNativeAssetId,
     #[error("missing issuer authorization for asset creation")]
     MissingIssuerAuthorization,
     #[error("asset supply exceeds declared maximum")]
@@ -161,6 +163,9 @@ impl LedgerState {
         } = &tx.core.kind
         {
             let asset_id = derive_asset_id(definition, chain_id);
+            if is_qcoin_asset_id(&asset_id) {
+                return Err(LedgerError::ReservedNativeAssetId);
+            }
             if self.assets.contains_key(&asset_id) {
                 return Err(LedgerError::AssetAlreadyExists);
             }
