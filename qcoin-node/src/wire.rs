@@ -1,9 +1,9 @@
-use crate::{SubmitBlockResponse, TipResponse};
-use qcoin_types::Block;
+use crate::{SubmitBlockResponse, SubmitTransactionResponse, TipResponse};
+use qcoin_types::{Block, Hash256, Transaction};
 use serde::{Deserialize, Serialize};
 
 const QCOIN_WIRE_MAGIC: [u8; 4] = *b"QCN1";
-pub const WIRE_VERSION: u16 = 1;
+pub const WIRE_VERSION: u16 = 2;
 pub const MIN_COMPATIBLE_WIRE_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,10 +22,31 @@ pub enum WireMessage {
     HelloResponse(NodeHello),
     TipRequest,
     TipResponse(TipResponse),
-    BlockRequest { height: u64 },
-    BlockResponse { height: u64, block: Option<Block> },
-    SubmitBlock { block: Block },
+    BlockRequest {
+        height: u64,
+    },
+    BlockResponse {
+        height: u64,
+        block: Option<Block>,
+    },
+    SubmitBlock {
+        block: Block,
+    },
     SubmitBlockResponse(SubmitBlockResponse),
+    TransactionAnnounce {
+        tx_id: Hash256,
+    },
+    TransactionRequest {
+        tx_id: Hash256,
+    },
+    TransactionResponse {
+        tx_id: Hash256,
+        transaction: Option<Transaction>,
+    },
+    SubmitTransaction {
+        transaction: Transaction,
+    },
+    SubmitTransactionResponse(SubmitTransactionResponse),
 }
 
 pub fn local_node_hello(
@@ -39,6 +60,8 @@ pub fn local_node_hello(
     if multicast_enabled {
         capabilities.push("multicast-discovery".to_string());
     }
+    capabilities.push("tx-submit-v1".to_string());
+    capabilities.push("tx-announce-v1".to_string());
     if validator {
         capabilities.push("validator".to_string());
     }
@@ -105,6 +128,7 @@ mod tests {
         decode, encode, ensure_hello_compatible, ensure_version_compatible, local_node_hello,
         NodeHello, WireMessage, WIRE_VERSION,
     };
+    use qcoin_types::{Transaction, TransactionCore, TransactionKind, TransactionWitness};
 
     #[test]
     fn wire_round_trips_tip_request() {
@@ -124,6 +148,24 @@ mod tests {
         let encoded = encode(&WireMessage::HelloResponse(hello.clone())).unwrap();
         let decoded = decode(&encoded).unwrap();
         assert_eq!(decoded, WireMessage::HelloResponse(hello));
+    }
+
+    #[test]
+    fn wire_round_trips_submit_transaction() {
+        let transaction = Transaction {
+            core: TransactionCore {
+                kind: TransactionKind::Transfer,
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+            },
+            witness: TransactionWitness::default(),
+        };
+        let encoded = encode(&WireMessage::SubmitTransaction {
+            transaction: transaction.clone(),
+        })
+        .unwrap();
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(decoded, WireMessage::SubmitTransaction { transaction });
     }
 
     #[test]

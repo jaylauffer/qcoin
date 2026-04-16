@@ -6,13 +6,13 @@ use qcoin_consensus::{ConsensusEngine, DummyConsensusEngine};
 use qcoin_crypto::{default_registry, PqSchemeRegistry, PrivateKey, PublicKey, SignatureSchemeId};
 use qcoin_ledger::{ChainState, LedgerState};
 use qcoin_script::DeterministicScriptEngine;
-use qcoin_types::{Block, Transaction};
+use qcoin_types::{Block, Hash256, Transaction};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
     fs::{self, File},
     io::{Read, Write},
-    net::{Ipv4Addr, Ipv6Addr},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -54,6 +54,8 @@ enum Commands {
         once: bool,
         #[arg(long, action = ArgAction::Set)]
         produce: Option<bool>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        produce_empty_blocks: bool,
         #[arg(long, value_enum, default_value_t = SchemeArg::Dilithium2)]
         scheme: SchemeArg,
         #[arg(long)]
@@ -64,6 +66,15 @@ enum Commands {
         cluster_manifest_json: Option<PathBuf>,
         #[arg(long)]
         validator_public_key_hex: Vec<String>,
+    },
+    /// Submit a transaction to a running node over the qcoin UDP wire protocol
+    SubmitTx {
+        #[arg(long)]
+        tx_json: PathBuf,
+        #[arg(long)]
+        target: String,
+        #[arg(long, default_value_t = 3)]
+        timeout_seconds: u64,
     },
     /// Generate a new PQ keypair using the dummy scheme
     Keygen {
@@ -139,6 +150,13 @@ struct SubmitBlockResponse {
     message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SubmitTransactionResponse {
+    accepted: bool,
+    tx_id_hex: String,
+    message: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct MulticastV4Config {
     group: Ipv4Addr,
@@ -164,12 +182,19 @@ struct StartupProfile {
 struct NodeRuntime {
     chain: ChainState,
     blocks: Vec<Block>,
+    pending_transactions: Vec<Transaction>,
     consensus: DummyConsensusEngine,
     script_engine: DeterministicScriptEngine,
     state_path: PathBuf,
     blocks_path: PathBuf,
     node_public_key_hex: String,
     node_is_validator: bool,
+    produce_empty_blocks: bool,
+}
+
+enum TransactionAcceptStatus {
+    AcceptedNew(Hash256),
+    AlreadyPending(Hash256),
 }
 
 fn main() {
@@ -185,6 +210,7 @@ fn main() {
             listen,
             once,
             produce,
+            produce_empty_blocks,
             scheme,
             keypair_json,
             network_config_json,
@@ -199,12 +225,18 @@ fn main() {
             listen,
             once,
             produce,
+            produce_empty_blocks,
             scheme,
             keypair_json,
             network_config_json,
             cluster_manifest_json,
             validator_public_key_hex,
         ),
+        Commands::SubmitTx {
+            tx_json,
+            target,
+            timeout_seconds,
+        } => submit_transaction_via_udp(tx_json, target, timeout_seconds),
         Commands::Keygen { scheme } => generate_keypair(scheme),
     }
 }
@@ -219,6 +251,7 @@ fn run_node(
     listen_addr: String,
     once: bool,
     produce: Option<bool>,
+    produce_empty_blocks: bool,
     scheme: SchemeArg,
     keypair_json: Option<PathBuf>,
     network_config_json: Option<PathBuf>,
@@ -376,12 +409,14 @@ fn run_node(
     let runtime = Arc::new(Mutex::new(NodeRuntime {
         chain,
         blocks,
+        pending_transactions: Vec::new(),
         consensus,
         script_engine: DeterministicScriptEngine::default(),
         state_path,
         blocks_path,
         node_public_key_hex,
         node_is_validator,
+        produce_empty_blocks,
     }));
 
     if once {
@@ -472,6 +507,95 @@ fn run_node(
 
     shutdown_requested.store(true, Ordering::SeqCst);
     let _ = server_thread.join();
+}
+
+fn submit_transaction_via_udp(tx_json: PathBuf, target: String, timeout_seconds: u64) {
+    let transaction = match load_transaction_json(&tx_json) {
+        Ok(transaction) => transaction,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
+    };
+    let target_addr = match node::resolve_endpoint_addr(&target) {
+        Ok(addr) => addr,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
+    };
+    let bind_addr: SocketAddr = match target_addr {
+        SocketAddr::V4(_) => "0.0.0.0:0".parse().expect("valid IPv4 wildcard bind"),
+        SocketAddr::V6(_) => "[::]:0".parse().expect("valid IPv6 wildcard bind"),
+    };
+    let socket = match UdpSocket::bind(bind_addr) {
+        Ok(socket) => socket,
+        Err(err) => {
+            eprintln!("Failed to bind UDP submit socket on {bind_addr}: {err}");
+            return;
+        }
+    };
+    if let Err(err) = socket.set_read_timeout(Some(Duration::from_secs(timeout_seconds.max(1)))) {
+        eprintln!("Failed to set UDP submit timeout: {err}");
+        return;
+    }
+
+    let frame = match wire::encode(&wire::WireMessage::SubmitTransaction {
+        transaction: transaction.clone(),
+    }) {
+        Ok(frame) => frame,
+        Err(err) => {
+            eprintln!("Failed to encode transaction submission: {err}");
+            return;
+        }
+    };
+    if let Err(err) = socket.send_to(&frame, target_addr) {
+        eprintln!("Failed to submit transaction to {target_addr}: {err}");
+        return;
+    }
+
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let (len, source) = match socket.recv_from(&mut buf) {
+            Ok(result) => result,
+            Err(err) => {
+                eprintln!("Timed out waiting for transaction response from {target_addr}: {err}");
+                return;
+            }
+        };
+        if source != target_addr {
+            continue;
+        }
+        let message = match wire::decode(&buf[..len]) {
+            Ok(message) => message,
+            Err(err) => {
+                eprintln!("Discarding invalid UDP response from {source}: {err}");
+                continue;
+            }
+        };
+        match message {
+            wire::WireMessage::SubmitTransactionResponse(response) => {
+                match serde_json::to_string_pretty(&response) {
+                    Ok(json) => println!("{json}"),
+                    Err(_) => println!(
+                        "{{\"accepted\":{},\"tx_id_hex\":\"{}\",\"message\":\"{}\"}}",
+                        response.accepted, response.tx_id_hex, response.message
+                    ),
+                }
+                return;
+            }
+            wire::WireMessage::HelloRequest => continue,
+            wire::WireMessage::HelloResponse(_) => continue,
+            _ => continue,
+        }
+    }
+}
+
+fn load_transaction_json(path: &Path) -> Result<Transaction, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|err| format!("Failed to read transaction JSON {}: {err}", path.display()))?;
+    serde_json::from_str(&text)
+        .map_err(|err| format!("Failed to parse transaction JSON {}: {err}", path.display()))
 }
 
 fn handle_request(runtime: &mut NodeRuntime, node_info: &wire::NodeHello, mut request: Request) {
@@ -633,19 +757,32 @@ fn sync_from_peer_http(runtime: &Arc<Mutex<NodeRuntime>>, peer: &str) -> Result<
     Ok(())
 }
 
-fn produce_one_block(runtime: &Arc<Mutex<NodeRuntime>>) -> Result<(u64, Block), String> {
+fn produce_one_block(runtime: &Arc<Mutex<NodeRuntime>>) -> Result<Option<(u64, Block)>, String> {
     let mut runtime = runtime
         .lock()
         .map_err(|err| format!("failed to lock runtime for block production: {err}"))?;
-    let txs: Vec<Transaction> = Vec::new();
+    if !runtime
+        .consensus
+        .can_propose_next_block(&runtime.chain)
+        .map_err(|err| format!("Failed to evaluate proposer schedule: {err}"))?
+    {
+        return Ok(None);
+    }
+    if runtime.pending_transactions.is_empty() && !runtime.produce_empty_blocks {
+        return Ok(None);
+    }
+    let txs = runtime.pending_transactions.clone();
     let block = runtime
         .consensus
         .propose_block(&runtime.chain, txs)
         .map_err(|err| format!("Failed to propose block: {err}"))?;
 
     let height = apply_block(&mut runtime, block.clone())?;
-    println!("Produced block at height {height}");
-    Ok((height, block))
+    println!(
+        "Produced block at height {height} with {} transaction(s)",
+        block.transactions.len()
+    );
+    Ok(Some((height, block)))
 }
 
 fn same_peer_endpoint(peer: &str, self_peer_url: &str) -> bool {
@@ -665,12 +802,100 @@ fn apply_block(runtime: &mut NodeRuntime, block: Block) -> Result<u64, String> {
         .map_err(|err| format!("Failed to apply block: {err}"))?;
 
     runtime.blocks.push(block);
+    reconcile_pending_transactions(runtime);
     let new_height = runtime.chain.height;
 
     save_chain_state(&runtime.state_path, &runtime.chain)?;
     save_block_history(&runtime.blocks_path, &runtime.blocks)?;
 
     Ok(new_height)
+}
+
+fn accept_transaction(
+    runtime: &mut NodeRuntime,
+    transaction: Transaction,
+) -> Result<TransactionAcceptStatus, String> {
+    let tx_id = transaction.tx_id();
+    if transaction_is_committed(runtime, tx_id) {
+        return Err(format!(
+            "transaction {} is already committed",
+            to_hex(&tx_id)
+        ));
+    }
+    if runtime
+        .pending_transactions
+        .iter()
+        .any(|pending| pending.tx_id() == tx_id)
+    {
+        return Ok(TransactionAcceptStatus::AlreadyPending(tx_id));
+    }
+
+    let mut ledger = runtime.chain.ledger.clone();
+    let block_height = runtime.chain.height.saturating_add(1);
+    for pending in &runtime.pending_transactions {
+        ledger
+            .apply_transaction(
+                pending,
+                &runtime.script_engine,
+                block_height,
+                runtime.chain.chain_id,
+            )
+            .map_err(|err| format!("Pending mempool transaction became invalid: {err}"))?;
+    }
+    ledger
+        .apply_transaction(
+            &transaction,
+            &runtime.script_engine,
+            block_height,
+            runtime.chain.chain_id,
+        )
+        .map_err(|err| format!("Failed to validate transaction for mempool admission: {err}"))?;
+
+    runtime.pending_transactions.push(transaction);
+    Ok(TransactionAcceptStatus::AcceptedNew(tx_id))
+}
+
+fn reconcile_pending_transactions(runtime: &mut NodeRuntime) {
+    if runtime.pending_transactions.is_empty() {
+        return;
+    }
+
+    let committed_tx_ids = runtime
+        .blocks
+        .iter()
+        .flat_map(|block| block.transactions.iter().map(Transaction::tx_id))
+        .collect::<std::collections::HashSet<_>>();
+    let mut retained = Vec::with_capacity(runtime.pending_transactions.len());
+    let mut simulated_ledger = runtime.chain.ledger.clone();
+    let next_height = runtime.chain.height.saturating_add(1);
+
+    for transaction in runtime.pending_transactions.drain(..) {
+        let tx_id = transaction.tx_id();
+        if committed_tx_ids.contains(&tx_id) {
+            continue;
+        }
+        match simulated_ledger.apply_transaction(
+            &transaction,
+            &runtime.script_engine,
+            next_height,
+            runtime.chain.chain_id,
+        ) {
+            Ok(()) => retained.push(transaction),
+            Err(err) => eprintln!(
+                "Dropping pending transaction {} after chain update: {err}",
+                to_hex(&tx_id)
+            ),
+        }
+    }
+
+    runtime.pending_transactions = retained;
+}
+
+fn transaction_is_committed(runtime: &NodeRuntime, tx_id: Hash256) -> bool {
+    runtime
+        .blocks
+        .iter()
+        .any(|block| block.transactions.iter().any(|tx| tx.tx_id() == tx_id))
 }
 
 fn respond_text(request: Request, status: u16, body: &str) -> std::io::Result<()> {

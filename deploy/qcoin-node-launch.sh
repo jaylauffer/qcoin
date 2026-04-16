@@ -11,6 +11,7 @@ set -euo pipefail
 QCOIN_INTERVAL_SECONDS="${QCOIN_INTERVAL_SECONDS:-5}"
 QCOIN_SYNC_INTERVAL_SECONDS="${QCOIN_SYNC_INTERVAL_SECONDS:-3}"
 QCOIN_PRODUCE="${QCOIN_PRODUCE:-}"
+QCOIN_PRODUCE_EMPTY_BLOCKS="${QCOIN_PRODUCE_EMPTY_BLOCKS:-}"
 QCOIN_SCHEME="${QCOIN_SCHEME:-dilithium2}"
 
 mkdir -p \
@@ -32,6 +33,10 @@ run_args=(
 
 if [[ -n "${QCOIN_PRODUCE}" ]]; then
   run_args+=(--produce "$QCOIN_PRODUCE")
+fi
+
+if [[ "${QCOIN_PRODUCE_EMPTY_BLOCKS}" == "true" ]]; then
+  run_args+=(--produce-empty-blocks)
 fi
 
 if [[ -n "${QCOIN_NETWORK_CONFIG_JSON:-}" ]]; then

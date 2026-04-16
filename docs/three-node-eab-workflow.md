@@ -92,6 +92,8 @@ Example for `10.10.10.3` as an observer:
 
 The rendered manifest uses the default multicast group `ff02::5143:6f69:6e`. Leave the interface unset to let Unix hosts auto-discover multicast-capable IPv6 interfaces, or pass `--multicast-v6-interface` if you want to pin one NIC. In the current node model, multicast only handles discovery. Once peers respond, block sync and propagation continue over unicast UDP.
 
+The node now stays idle when there is no submitted work. If you want an old-style idle heartbeat for a one-off smoke test, set `QCOIN_PRODUCE_EMPTY_BLOCKS=true`, but leave it unset for normal development.
+
 The first two nodes do not need `QCOIN_PRODUCE=true` in the env file. Because their keys are in the manifest validator set, they auto-produce by default. `10.10.10.3` is forced to observer mode with `--produce false`.
 
 Install the rendered files on each machine:
@@ -127,6 +129,14 @@ curl http://10.10.10.1:9700/node-info
 curl http://10.10.10.1:9700/tip
 curl http://10.10.10.2:9700/tip
 curl http://10.10.10.3:9700/tip
+```
+
+For transaction ingress, use the UDP qcoin wire instead of HTTP:
+
+```bash
+cargo run -p qcoin-node -- submit-tx \
+  --target 10.10.10.1:9700 \
+  --tx-json ./path/to/transaction.json
 ```
 
 ## Phase 6: Bring up EAB against qcoin

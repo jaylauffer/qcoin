@@ -1,5 +1,6 @@
 use crate::{
-    apply_block, produce_one_block, wire::NodeHello, NodeRuntime, SubmitBlockResponse, TipResponse,
+    apply_block, produce_one_block, wire::NodeHello, NodeRuntime, SubmitBlockResponse,
+    SubmitTransactionResponse, TipResponse, TransactionAcceptStatus,
 };
 use anyhow::Error;
 #[cfg(not(any(
@@ -27,7 +28,7 @@ use loadngo_proactor::KqueuePort;
 use loadngo_proactor::ReadinessPort;
 use loadngo_proactor::{CompletionKind, CompletionPort, Proactor, ProactorHandle};
 use network::{Config as NetworkConfig, MulticastConfig, Network};
-use qcoin_types::Block;
+use qcoin_types::{Block, Hash256, Transaction};
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
@@ -70,6 +71,7 @@ struct SyncState {
     known_peers: HashSet<SocketAddr>,
     peer_hello: HashMap<SocketAddr, NodeHello>,
     peer_rejections: HashMap<SocketAddr, String>,
+    pending_transaction_announcements: HashMap<SocketAddr, HashSet<Hash256>>,
 }
 
 impl SyncState {
@@ -80,6 +82,7 @@ impl SyncState {
             known_peers: HashSet::new(),
             peer_hello: HashMap::new(),
             peer_rejections: HashMap::new(),
+            pending_transaction_announcements: HashMap::new(),
         }
     }
 }
@@ -99,18 +102,22 @@ pub fn resolve_peer_addrs(
 ) -> Result<Vec<SocketAddr>, String> {
     let mut resolved = Vec::new();
     for peer in peers {
-        let normalized = normalize_peer_endpoint(peer);
-        let mut addrs = normalized
-            .to_socket_addrs()
-            .map_err(|err| format!("failed to resolve peer {peer}: {err}"))?;
-        let Some(addr) = addrs.next() else {
-            return Err(format!("peer {peer} did not resolve to a socket address"));
-        };
+        let addr = resolve_endpoint_addr(peer)?;
         if addr != self_bind_addr && !resolved.contains(&addr) {
             resolved.push(addr);
         }
     }
     Ok(resolved)
+}
+
+pub fn resolve_endpoint_addr(endpoint: &str) -> Result<SocketAddr, String> {
+    let normalized = normalize_peer_endpoint(endpoint);
+    let mut addrs = normalized
+        .to_socket_addrs()
+        .map_err(|err| format!("failed to resolve endpoint {endpoint}: {err}"))?;
+    addrs
+        .next()
+        .ok_or_else(|| format!("endpoint {endpoint} did not resolve to a socket address"))
 }
 
 pub fn run_network_core(
@@ -632,6 +639,28 @@ where
                 }
                 Ok(())
             }
+            crate::wire::WireMessage::TransactionAnnounce { tx_id } => {
+                self.handle_transaction_announce(source, tx_id)
+            }
+            crate::wire::WireMessage::TransactionRequest { tx_id } => {
+                self.ensure_compatible_peer(source)?;
+                self.handle_transaction_request(source, tx_id)
+            }
+            crate::wire::WireMessage::TransactionResponse { tx_id, transaction } => {
+                self.handle_transaction_response(source, tx_id, transaction)
+            }
+            crate::wire::WireMessage::SubmitTransaction { transaction } => {
+                self.handle_submitted_transaction(source, transaction)
+            }
+            crate::wire::WireMessage::SubmitTransactionResponse(response) => {
+                if !response.accepted {
+                    eprintln!(
+                        "Peer {source} rejected submitted transaction {}: {}",
+                        response.tx_id_hex, response.message
+                    );
+                }
+                Ok(())
+            }
         }
     }
 
@@ -730,6 +759,16 @@ where
         Ok(())
     }
 
+    fn broadcast_transaction_announce(&self, tx_id: Hash256) -> Result<(), String> {
+        for target in self.discovery_targets() {
+            self.send_wire(
+                target,
+                crate::wire::WireMessage::TransactionAnnounce { tx_id },
+            )?;
+        }
+        Ok(())
+    }
+
     fn broadcast_block(&self, block: &Block) -> Result<(), String> {
         let peers = self.known_peers();
         if peers.is_empty() {
@@ -760,7 +799,9 @@ where
     }
 
     fn produce_now(&self) -> Result<Option<u64>, String> {
-        let (height, block) = produce_one_block(&self.runtime)?;
+        let Some((height, block)) = produce_one_block(&self.runtime)? else {
+            return Ok(None);
+        };
         self.broadcast_block(&block)?;
         Ok(Some(height))
     }
@@ -816,21 +857,161 @@ where
             sync_state.known_peers.remove(&source);
             sync_state.peer_hello.remove(&source);
             sync_state.peer_rejections.insert(source, err.clone());
+            sync_state.pending_transaction_announcements.remove(&source);
             eprintln!("Handshake rejected for {source}: {err}");
             return Ok(());
         }
-        let mut sync_state = self.sync_state.lock().expect("sync state poisoned");
-        let wire_version = hello.wire_version;
-        let software_version = hello.software_version.clone();
-        let peer_key = hello.node_public_key_hex.clone();
-        let reliable = self.is_reliable_peer_key(&peer_key);
-        sync_state.peer_rejections.remove(&source);
-        sync_state.known_peers.insert(source);
-        sync_state.peer_hello.insert(source, hello);
+        let (wire_version, software_version, reliable, pending_tx_ids) = {
+            let mut sync_state = self.sync_state.lock().expect("sync state poisoned");
+            let wire_version = hello.wire_version;
+            let software_version = hello.software_version.clone();
+            let peer_key = hello.node_public_key_hex.clone();
+            let reliable = self.is_reliable_peer_key(&peer_key);
+            let pending_tx_ids = sync_state
+                .pending_transaction_announcements
+                .remove(&source)
+                .map(|ids| ids.into_iter().collect::<Vec<_>>())
+                .unwrap_or_default();
+            sync_state.peer_rejections.remove(&source);
+            sync_state.known_peers.insert(source);
+            sync_state.peer_hello.insert(source, hello);
+            (wire_version, software_version, reliable, pending_tx_ids)
+        };
         println!(
             "Handshake accepted for {source} using wire v{wire_version} ({software_version}) [{}]",
             if reliable { "reliable" } else { "discovered" }
         );
+        for tx_id in pending_tx_ids {
+            if !self.has_transaction(tx_id)? {
+                self.send_wire(
+                    source,
+                    crate::wire::WireMessage::TransactionRequest { tx_id },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_transaction_announce(
+        &self,
+        source: SocketAddr,
+        tx_id: Hash256,
+    ) -> Result<(), String> {
+        if self.has_transaction(tx_id)? {
+            return Ok(());
+        }
+
+        let peer_state = {
+            let mut sync_state = self.sync_state.lock().expect("sync state poisoned");
+            if sync_state.known_peers.contains(&source) {
+                Some(true)
+            } else if sync_state.peer_rejections.contains_key(&source) {
+                Some(false)
+            } else {
+                sync_state
+                    .pending_transaction_announcements
+                    .entry(source)
+                    .or_default()
+                    .insert(tx_id);
+                None
+            }
+        };
+
+        match peer_state {
+            Some(true) => self.send_wire(
+                source,
+                crate::wire::WireMessage::TransactionRequest { tx_id },
+            ),
+            Some(false) => Ok(()),
+            None => {
+                let _ = self.send_wire(source, crate::wire::WireMessage::HelloRequest);
+                let _ = self.send_local_hello(source);
+                Ok(())
+            }
+        }
+    }
+
+    fn handle_transaction_request(&self, source: SocketAddr, tx_id: Hash256) -> Result<(), String> {
+        let transaction = self.transaction_by_id(tx_id)?;
+        self.send_wire(
+            source,
+            crate::wire::WireMessage::TransactionResponse { tx_id, transaction },
+        )
+    }
+
+    fn handle_transaction_response(
+        &self,
+        source: SocketAddr,
+        tx_id: Hash256,
+        transaction: Option<Transaction>,
+    ) -> Result<(), String> {
+        self.ensure_compatible_peer(source)?;
+        let Some(transaction) = transaction else {
+            return Ok(());
+        };
+        if transaction.tx_id() != tx_id {
+            return Err(format!(
+                "peer {source} sent mismatched transaction payload for {}",
+                crate::to_hex(&tx_id)
+            ));
+        }
+        match self.accept_transaction(transaction)? {
+            TransactionAcceptStatus::AcceptedNew(accepted_tx_id) => {
+                println!(
+                    "Accepted transaction {} from {source}",
+                    crate::to_hex(&accepted_tx_id)
+                );
+                self.broadcast_transaction_announce(accepted_tx_id)?;
+            }
+            TransactionAcceptStatus::AlreadyPending(_) => {}
+        }
+        Ok(())
+    }
+
+    fn handle_submitted_transaction(
+        &self,
+        source: SocketAddr,
+        transaction: Transaction,
+    ) -> Result<(), String> {
+        let tx_id = transaction.tx_id();
+        let (response, should_announce) = match self.accept_transaction(transaction) {
+            Ok(TransactionAcceptStatus::AcceptedNew(accepted_tx_id)) => (
+                SubmitTransactionResponse {
+                    accepted: true,
+                    tx_id_hex: crate::to_hex(&accepted_tx_id),
+                    message: "transaction accepted into mempool".to_string(),
+                },
+                Some(accepted_tx_id),
+            ),
+            Ok(TransactionAcceptStatus::AlreadyPending(existing_tx_id)) => (
+                SubmitTransactionResponse {
+                    accepted: true,
+                    tx_id_hex: crate::to_hex(&existing_tx_id),
+                    message: "transaction already pending".to_string(),
+                },
+                None,
+            ),
+            Err(err) => (
+                SubmitTransactionResponse {
+                    accepted: false,
+                    tx_id_hex: crate::to_hex(&tx_id),
+                    message: err,
+                },
+                None,
+            ),
+        };
+        self.send_wire(
+            source,
+            crate::wire::WireMessage::SubmitTransactionResponse(response),
+        )?;
+        if let Some(tx_id) = should_announce {
+            if let Err(err) = self.broadcast_transaction_announce(tx_id) {
+                eprintln!(
+                    "Failed to announce accepted transaction {}: {err}",
+                    crate::to_hex(&tx_id)
+                );
+            }
+        }
         Ok(())
     }
 
@@ -889,6 +1070,36 @@ where
         self.with_runtime(|runtime| runtime.chain.chain_id)
     }
 
+    fn has_transaction(&self, tx_id: Hash256) -> Result<bool, String> {
+        self.with_runtime(|runtime| {
+            runtime
+                .pending_transactions
+                .iter()
+                .any(|tx| tx.tx_id() == tx_id)
+                || runtime
+                    .blocks
+                    .iter()
+                    .any(|block| block.transactions.iter().any(|tx| tx.tx_id() == tx_id))
+        })
+    }
+
+    fn transaction_by_id(&self, tx_id: Hash256) -> Result<Option<Transaction>, String> {
+        self.with_runtime(|runtime| {
+            runtime
+                .pending_transactions
+                .iter()
+                .find(|tx| tx.tx_id() == tx_id)
+                .cloned()
+        })
+    }
+
+    fn accept_transaction(
+        &self,
+        transaction: Transaction,
+    ) -> Result<TransactionAcceptStatus, String> {
+        self.with_runtime_mut(|runtime| crate::accept_transaction(runtime, transaction))
+    }
+
     fn is_reliable_peer_key(&self, public_key_hex: &str) -> bool {
         self.reliable_node_public_key_hex.contains(public_key_hex)
     }
@@ -931,6 +1142,7 @@ mod tests {
     use qcoin_consensus::DummyConsensusEngine;
     use qcoin_crypto::{default_registry, PqSchemeRegistry, SignatureSchemeId};
     use qcoin_script::DeterministicScriptEngine;
+    use qcoin_types::{Transaction, TransactionCore, TransactionKind, TransactionWitness};
     use std::fs;
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
     use std::sync::{Arc, Mutex};
@@ -995,7 +1207,7 @@ mod tests {
         let dir_b = tempdir().unwrap();
 
         let runtime_a = Arc::new(Mutex::new(
-            producing_runtime(dir_a.path(), signer, vec![validator_public.clone()]).unwrap(),
+            producing_runtime(dir_a.path(), signer, vec![validator_public.clone()], true).unwrap(),
         ));
         let runtime_b = Arc::new(Mutex::new(
             validating_runtime(dir_b.path(), vec![validator_public]).unwrap(),
@@ -1085,6 +1297,175 @@ mod tests {
         assert_eq!(runtime_b.lock().unwrap().chain.height, 1);
     }
 
+    #[test]
+    fn qcoin_node_service_does_not_produce_empty_blocks_by_default() {
+        let signer = shared_signer().unwrap();
+        let validator_public = signer.public_key.clone();
+        let dir = tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(
+            producing_runtime(dir.path(), signer, vec![validator_public], false).unwrap(),
+        ));
+
+        let network = Arc::new(
+            super::build_network(
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)),
+                &[],
+            )
+            .unwrap(),
+        );
+        let addr = network.local_addr().unwrap();
+        let proactor = Proactor::new(ChannelPort::new());
+        let handle = proactor.handle();
+        let worker = thread::spawn(move || proactor.run_until_stopped().unwrap());
+
+        let service = NodeService::start_polling(
+            Arc::clone(&runtime),
+            Arc::clone(&network),
+            CoreConfig {
+                bind_addr: addr,
+                peers: Vec::new(),
+                multicast: Vec::new(),
+                sync_interval: Duration::from_secs(30),
+                produce_interval: Duration::from_secs(30),
+                produce: false,
+                reliable_node_public_key_hex: Vec::new(),
+            },
+            handle.clone(),
+            Duration::from_millis(2),
+        )
+        .unwrap();
+
+        assert_eq!(service.produce_now().unwrap(), None);
+
+        handle.stop().unwrap();
+        worker.join().unwrap();
+
+        assert_eq!(runtime.lock().unwrap().chain.height, 0);
+    }
+
+    #[test]
+    fn qcoin_node_service_multicasts_transaction_announce_and_fetches_unicast() {
+        let signer = shared_signer().unwrap();
+        let validator_public = signer.public_key.clone();
+
+        let dir_a = tempdir().unwrap();
+        let dir_b = tempdir().unwrap();
+
+        let runtime_a = Arc::new(Mutex::new(
+            producing_runtime(dir_a.path(), signer, vec![validator_public.clone()], false).unwrap(),
+        ));
+        let runtime_b = Arc::new(Mutex::new(
+            validating_runtime(dir_b.path(), vec![validator_public]).unwrap(),
+        ));
+
+        let network_a = Arc::new(
+            super::build_network(
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)),
+                &[],
+            )
+            .unwrap(),
+        );
+        let addr_a = network_a.local_addr().unwrap();
+
+        let network_b = Arc::new(
+            super::build_network(
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)),
+                &[addr_a],
+            )
+            .unwrap(),
+        );
+        let addr_b = network_b.local_addr().unwrap();
+
+        let proactor_a = Proactor::new(ChannelPort::new());
+        let handle_a = proactor_a.handle();
+        let worker_a = thread::spawn(move || proactor_a.run_until_stopped().unwrap());
+
+        let service_a = NodeService::start_polling(
+            Arc::clone(&runtime_a),
+            Arc::clone(&network_a),
+            CoreConfig {
+                bind_addr: addr_a,
+                peers: vec![addr_b],
+                multicast: Vec::new(),
+                sync_interval: Duration::from_secs(30),
+                produce_interval: Duration::from_secs(30),
+                produce: false,
+                reliable_node_public_key_hex: Vec::new(),
+            },
+            handle_a.clone(),
+            Duration::from_millis(2),
+        )
+        .unwrap();
+
+        let proactor_b = Proactor::new(ChannelPort::new());
+        let handle_b = proactor_b.handle();
+        let worker_b = thread::spawn(move || proactor_b.run_until_stopped().unwrap());
+
+        let service_b = NodeService::start_polling(
+            Arc::clone(&runtime_b),
+            Arc::clone(&network_b),
+            CoreConfig {
+                bind_addr: addr_b,
+                peers: vec![addr_a],
+                multicast: Vec::new(),
+                sync_interval: Duration::from_secs(30),
+                produce_interval: Duration::from_secs(30),
+                produce: false,
+                reliable_node_public_key_hex: Vec::new(),
+            },
+            handle_b.clone(),
+            Duration::from_millis(2),
+        )
+        .unwrap();
+
+        wait_for_handshake(&service_a, addr_b, "node B");
+        wait_for_handshake(&service_b, addr_a, "node A");
+
+        service_a
+            .inner
+            .handle_submitted_transaction("127.0.0.1:9999".parse().unwrap(), test_transaction())
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if runtime_b.lock().unwrap().pending_transactions.len() == 1 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for remote qcoin node to fetch announced transaction"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let tx_id = runtime_a.lock().unwrap().pending_transactions[0].tx_id();
+        assert_eq!(
+            runtime_b.lock().unwrap().pending_transactions[0].tx_id(),
+            tx_id
+        );
+        assert_eq!(service_a.produce_now().unwrap(), Some(1));
+
+        let block_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if runtime_b.lock().unwrap().chain.height == 1 {
+                break;
+            }
+            assert!(
+                Instant::now() < block_deadline,
+                "timed out waiting for remote qcoin node to accept produced transaction block"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        handle_a.stop().unwrap();
+        handle_b.stop().unwrap();
+        worker_a.join().unwrap();
+        worker_b.join().unwrap();
+
+        assert_eq!(runtime_a.lock().unwrap().pending_transactions.len(), 0);
+        assert_eq!(runtime_b.lock().unwrap().pending_transactions.len(), 0);
+    }
+
     struct SharedSigner {
         public_key: qcoin_crypto::PublicKey,
         private_key: qcoin_crypto::PrivateKey,
@@ -1109,6 +1490,7 @@ mod tests {
         base_dir: &std::path::Path,
         signer: SharedSigner,
         validators: Vec<qcoin_crypto::PublicKey>,
+        produce_empty_blocks: bool,
     ) -> Result<NodeRuntime, String> {
         let state_path = base_dir.join("state.json");
         let blocks_path = blocks_path_from_state_path(&state_path);
@@ -1138,12 +1520,14 @@ mod tests {
         Ok(NodeRuntime {
             chain,
             blocks,
+            pending_transactions: Vec::new(),
             consensus,
             script_engine: DeterministicScriptEngine::default(),
             state_path,
             blocks_path,
             node_public_key_hex,
             node_is_validator: true,
+            produce_empty_blocks,
         })
     }
 
@@ -1182,12 +1566,25 @@ mod tests {
         Ok(NodeRuntime {
             chain,
             blocks,
+            pending_transactions: Vec::new(),
             consensus,
             script_engine: DeterministicScriptEngine::default(),
             state_path,
             blocks_path,
             node_public_key_hex,
             node_is_validator: false,
+            produce_empty_blocks: false,
         })
+    }
+
+    fn test_transaction() -> Transaction {
+        Transaction {
+            core: TransactionCore {
+                kind: TransactionKind::Transfer,
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+            },
+            witness: TransactionWitness::default(),
+        }
     }
 }
