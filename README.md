@@ -211,7 +211,11 @@ Install it:
 sudo install -m 0644 deploy/cluster-manifest.example.json /etc/qcoin/cluster-manifest.json
 ```
 
-Then edit `/etc/qcoin/cluster-manifest.json` and replace the placeholder validator keys with the real `public_key_hex` values. If `interface` is omitted, `qcoin-node` auto-discovers multicast-capable IPv6 interfaces on Unix platforms. Set it explicitly if you want to pin discovery to one NIC.
+Then edit `/etc/qcoin/cluster-manifest.json` and replace the placeholder validator keys with the real `public_key_hex` values. If `interface` is omitted, `qcoin-node` now prefers the multicast-capable IPv6 interface that owns `--listen`, then falls back to broader Unix interface discovery only when it cannot map the bind address cleanly.
+
+Important:
+- interface indexes are machine-local
+- if you need explicit interface pinning on a mixed cluster, put `multicast_v6` in each node's local `network-config.json`, not only in the shared cluster manifest
 
 ### 5. Optional: create `/etc/qcoin/network-config.json`
 
@@ -285,7 +289,8 @@ tail -f /var/log/qcoin/node.err
 - Each machine should have a machine-specific `/etc/qcoin/qcoin-node.env` with its own `QCOIN_LISTEN`.
 - Every machine in the cluster should have the same `/etc/qcoin/cluster-manifest.json`.
 - `/etc/qcoin/network-config.json` is optional and machine-specific when used.
-- If you keep `multicast_v6`, use the same multicast group on every node. Leaving `interface` unset lets Unix nodes auto-detect multicast-capable interfaces.
+- If you keep `multicast_v6`, use the same multicast group on every node. Leaving `interface` unset now makes Unix nodes prefer the interface that owns `--listen`.
+- If nodes use different local interface indexes, pin `multicast_v6.interface` per node in `network-config.json` instead of hard-coding one shared index into `cluster-manifest.json`.
 - The `validator_public_key_hex` array in the cluster manifest must be identical across all machines, in the same order.
 - The `reliable_node_public_key_hex` list is advisory for bootstrap/sync preference; it does not grant validator rights.
 - Peer URLs should point at reachable private addresses such as `http://10.10.10.x:9700`.

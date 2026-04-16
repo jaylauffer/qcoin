@@ -90,7 +90,12 @@ Example for `10.10.10.3` as an observer:
   --produce false
 ```
 
-The rendered manifest uses the default multicast group `ff02::5143:6f69:6e`. Leave the interface unset to let Unix hosts auto-discover multicast-capable IPv6 interfaces, or pass `--multicast-v6-interface` if you want to pin one NIC. In the current node model, multicast only handles discovery. Once peers respond, block sync and propagation continue over unicast UDP.
+The rendered manifest uses the default multicast group `ff02::5143:6f69:6e`. Leave the interface unset to let `qcoin-node` prefer the interface that owns `--listen`; it only falls back to broader Unix multicast-interface discovery when it cannot map the bind address cleanly. In the current node model, multicast only handles discovery. Once peers respond, block sync and propagation continue over unicast UDP.
+
+If you must pin interfaces explicitly, do it per node:
+- interface indexes are machine-local
+- put `multicast_v6` in each node's local `network-config.json`
+- do not assume one shared `cluster-manifest.json` interface index will be valid on every machine
 
 The node now stays idle when there is no submitted work. If you want an old-style idle heartbeat for a one-off smoke test, set `QCOIN_PRODUCE_EMPTY_BLOCKS=true`, but leave it unset for normal development.
 
