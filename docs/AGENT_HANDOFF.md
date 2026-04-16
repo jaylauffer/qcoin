@@ -83,6 +83,8 @@ Good examples of note topics:
 - startup repair behavior
 - fork-choice policy
 - monetary policy
+- qcoin exit gate
+- EAB anchor transaction model
 - validator ordering semantics
 - EAB integration contract
 
@@ -176,6 +178,8 @@ When handing off work, include:
 ## If working on QCoin + EAB integration
 
 Do not assume the current mirroring behavior is the final contract.
+Read [QCOIN_EXIT_GATE.md](QCOIN_EXIT_GATE.md) before deciding qcoin bring-up work is complete enough to deprioritize.
+Read [EAB_ANCHOR_TRANSACTION_MODEL.md](EAB_ANCHOR_TRANSACTION_MODEL.md) first.
 If changing interaction between the two repos, document:
 - what EAB is allowed to submit
 - who signs what
