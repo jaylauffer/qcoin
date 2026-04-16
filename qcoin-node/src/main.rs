@@ -12,7 +12,7 @@ use std::{
     ffi::OsString,
     fs::{self, File},
     io::{Read, Write},
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -1156,11 +1156,99 @@ fn resolve_ipv6_multicast_interfaces(bind_addr: std::net::SocketAddr) -> Result<
             return Ok(vec![addr.scope_id()]);
         }
     }
+    #[cfg(unix)]
+    if let Some(indices) = discover_ipv6_multicast_interfaces_for_bind_addr(bind_addr)? {
+        return Ok(indices);
+    }
     discover_ipv6_multicast_interfaces()
 }
 
 #[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InterfaceCandidate {
+    index: u32,
+    ip: IpAddr,
+    is_loopback: bool,
+}
+
+#[cfg(unix)]
+fn discover_ipv6_multicast_interfaces_for_bind_addr(
+    bind_addr: std::net::SocketAddr,
+) -> Result<Option<Vec<u32>>, String> {
+    let bind_ip = match bind_addr {
+        std::net::SocketAddr::V4(addr) if !addr.ip().is_unspecified() => IpAddr::V4(*addr.ip()),
+        std::net::SocketAddr::V6(addr) if !addr.ip().is_unspecified() => IpAddr::V6(*addr.ip()),
+        _ => return Ok(None),
+    };
+
+    let candidates = discover_multicast_interface_candidates()?;
+    let preferred = select_multicast_interfaces_for_bind_ip(bind_ip, &candidates);
+    if preferred.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(preferred))
+    }
+}
+
+#[cfg(unix)]
+fn select_multicast_interfaces_for_bind_ip(
+    bind_ip: IpAddr,
+    candidates: &[InterfaceCandidate],
+) -> Vec<u32> {
+    let mut non_loopback = Vec::new();
+    let mut loopback = Vec::new();
+
+    for candidate in candidates {
+        if candidate.ip != bind_ip {
+            continue;
+        }
+        let target = if candidate.is_loopback {
+            &mut loopback
+        } else {
+            &mut non_loopback
+        };
+        if !target.contains(&candidate.index) {
+            target.push(candidate.index);
+        }
+    }
+
+    if !non_loopback.is_empty() {
+        return non_loopback;
+    }
+    loopback
+}
+
+#[cfg(unix)]
 fn discover_ipv6_multicast_interfaces() -> Result<Vec<u32>, String> {
+    let candidates = discover_multicast_interface_candidates()?;
+    let mut non_loopback = Vec::new();
+    let mut loopback = Vec::new();
+
+    for candidate in candidates {
+        if !matches!(candidate.ip, IpAddr::V6(_)) {
+            continue;
+        }
+        let target = if candidate.is_loopback {
+            &mut loopback
+        } else {
+            &mut non_loopback
+        };
+        if !target.contains(&candidate.index) {
+            target.push(candidate.index);
+        }
+    }
+
+    if !non_loopback.is_empty() {
+        return Ok(non_loopback);
+    }
+    if !loopback.is_empty() {
+        return Ok(loopback);
+    }
+    Err("no IPv6 multicast-capable interfaces found".to_string())
+}
+
+#[cfg(unix)]
+fn discover_multicast_interface_candidates() -> Result<Vec<InterfaceCandidate>, String> {
     use std::ptr;
 
     let mut head = ptr::null_mut();
@@ -1171,29 +1259,38 @@ fn discover_ipv6_multicast_interfaces() -> Result<Vec<u32>, String> {
         ));
     }
 
-    let mut non_loopback = Vec::new();
-    let mut loopback = Vec::new();
+    let mut candidates = Vec::new();
     let mut cursor = head;
     while !cursor.is_null() {
         let entry = unsafe { &*cursor };
-        if !entry.ifa_addr.is_null()
-            && unsafe { (*entry.ifa_addr).sa_family as i32 } == libc::AF_INET6
-        {
+        if !entry.ifa_addr.is_null() {
+            let family = unsafe { (*entry.ifa_addr).sa_family as i32 };
             let flags = entry.ifa_flags as i32;
             let is_up = flags & libc::IFF_UP as i32 != 0;
             let supports_multicast = flags & libc::IFF_MULTICAST as i32 != 0;
-            let is_loopback = flags & libc::IFF_LOOPBACK as i32 != 0;
             if is_up && supports_multicast {
                 let index = unsafe { libc::if_nametoindex(entry.ifa_name) };
                 if index != 0 {
-                    let target = if is_loopback {
-                        &mut loopback
-                    } else {
-                        &mut non_loopback
+                    let is_loopback = flags & libc::IFF_LOOPBACK as i32 != 0;
+                    let ip = match family {
+                        libc::AF_INET => {
+                            let addr = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in) };
+                            IpAddr::V4(Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr)))
+                        }
+                        libc::AF_INET6 => {
+                            let addr = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in6) };
+                            IpAddr::V6(Ipv6Addr::from(addr.sin6_addr.s6_addr))
+                        }
+                        _ => {
+                            cursor = entry.ifa_next;
+                            continue;
+                        }
                     };
-                    if !target.contains(&index) {
-                        target.push(index);
-                    }
+                    candidates.push(InterfaceCandidate {
+                        index,
+                        ip,
+                        is_loopback,
+                    });
                 }
             }
         }
@@ -1201,13 +1298,7 @@ fn discover_ipv6_multicast_interfaces() -> Result<Vec<u32>, String> {
     }
     unsafe { libc::freeifaddrs(head) };
 
-    if !non_loopback.is_empty() {
-        return Ok(non_loopback);
-    }
-    if !loopback.is_empty() {
-        return Ok(loopback);
-    }
-    Err("no IPv6 multicast-capable interfaces found".to_string())
+    Ok(candidates)
 }
 
 #[cfg(not(unix))]
@@ -1543,7 +1634,7 @@ mod tests {
     };
     use qcoin_consensus::{ConsensusEngine, DummyConsensusEngine};
     use qcoin_script::DeterministicScriptEngine;
-    use std::net::Ipv6Addr;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use tempfile::tempdir;
 
     #[test]
@@ -1576,6 +1667,55 @@ mod tests {
             "ff02::5143:6f69:6e".parse::<Ipv6Addr>().unwrap()
         );
         assert_eq!(configs[0].interface, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bind_ip_prefers_matching_non_loopback_multicast_interface() {
+        let selected = super::select_multicast_interfaces_for_bind_ip(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 146)),
+            &[
+                super::InterfaceCandidate {
+                    index: 7,
+                    ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+                    is_loopback: false,
+                },
+                super::InterfaceCandidate {
+                    index: 16,
+                    ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 146)),
+                    is_loopback: false,
+                },
+                super::InterfaceCandidate {
+                    index: 20,
+                    ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
+                    is_loopback: false,
+                },
+            ],
+        );
+
+        assert_eq!(selected, vec![16]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bind_ip_falls_back_to_loopback_only_when_needed() {
+        let selected = super::select_multicast_interfaces_for_bind_ip(
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            &[
+                super::InterfaceCandidate {
+                    index: 1,
+                    ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                    is_loopback: true,
+                },
+                super::InterfaceCandidate {
+                    index: 7,
+                    ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 146)),
+                    is_loopback: false,
+                },
+            ],
+        );
+
+        assert_eq!(selected, vec![1]);
     }
 
     #[test]
