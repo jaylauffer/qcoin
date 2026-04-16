@@ -305,6 +305,29 @@ Result:
 
 ---
 
+## QW-017 Rollout discipline
+Status: `done`
+
+Goal:
+- make branch-to-lab-to-main promotion explicit so the live cluster has source continuity
+
+Tasks:
+- define the roles of `dev` and `main`
+- require tagged rollout candidates
+- require identical committed revisions across live nodes
+- define the release-binary expectation for steady-state lab services
+- define the PR/rebase promotion step after lab validation
+
+Definition of done:
+- rollout policy exists under `docs/`
+- README and handoff docs point at it
+
+Result:
+- documented in `docs/ROLLOUT_POLICY.md`
+- qcoin rollout expectations are now explicit instead of relying on ad hoc live propagation
+
+---
+
 ## QW-016 Monetary policy definition
 Status: `done`
 

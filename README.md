@@ -36,6 +36,9 @@ Current code does not yet implement native QCOIN issuance. Generic assets can be
 For the current proof-of-concept direction, qcoin should sit behind `entitlement-achievement-blockchain` as an auditable proof layer. The qcoin-side anchoring contract for EAB is recorded in [docs/EAB_ANCHOR_TRANSACTION_MODEL.md](docs/EAB_ANCHOR_TRANSACTION_MODEL.md).
 The operational handoff point from qcoin bring-up to EAB-first work is recorded in [docs/QCOIN_EXIT_GATE.md](docs/QCOIN_EXIT_GATE.md). The current three-node lab passed that gate on `2026-04-16`; treat qcoin as active infrastructure work rather than the main blocker unless the gate needs to be re-opened.
 
+Rollout discipline for `dev` -> lab deployment -> `main` promotion is recorded
+in [ROLLOUT_POLICY.md](docs/ROLLOUT_POLICY.md).
+
 ## Node communication
 
 `qcoin-node` now runs its live peer core over `loadngo-proactor` and `loadngo/network`:
