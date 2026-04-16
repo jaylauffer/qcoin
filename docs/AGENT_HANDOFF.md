@@ -25,6 +25,7 @@ Near-term priority is:
 - integrity of persisted state
 - predictable startup/recovery behavior
 - explicit distributed behavior under peer divergence
+- explicit native QCOIN monetary policy and issuance boundaries
 - safe validator/config handling
 - harden the now-present transaction admission path and in-memory mempool without pretending it is durable yet
 
@@ -38,6 +39,7 @@ Before changing any of the following, add a short design note under `docs/`:
 - validator ordering semantics
 - timestamp validation rules
 - on-disk persistence format
+- native QCOIN issuance rules or fee semantics
 
 ### 2. Failure paths matter as much as happy paths
 For every substantial change, add tests for:
@@ -80,6 +82,7 @@ Good examples of note topics:
 - persistence model
 - startup repair behavior
 - fork-choice policy
+- monetary policy
 - validator ordering semantics
 - EAB integration contract
 
@@ -125,6 +128,13 @@ Be careful with:
 - mixed signature schemes
 - reliance on validator ordering without documenting it
 
+### Native asset policy
+Current monetary-policy direction is documented in [MONETARY_POLICY.md](MONETARY_POLICY.md).
+Be careful not to blur:
+- generic asset issuance through `CreateAsset`
+- native QCOIN issuance
+- fees vs protocol rewards
+
 ### Timestamp logic
 Any future-skew or monotonicity change can affect multi-node behavior quickly. Document and test such changes.
 
@@ -134,6 +144,7 @@ Avoid casual changes to:
 - `ChainState` serialized shape
 - `BlockHeader` encoding
 - `Transaction` hashing/id rules
+- native QCOIN issuance/conservation rules
 - default data paths used by `qcoin-node`
 - deploy examples
 

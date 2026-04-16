@@ -27,6 +27,10 @@ Runtime artifacts are written under `data/` by default (`data/qcoin-chain-state.
 
 Current `qcoin-node` consensus is deterministic proposer scheduling plus append-only tip extension. It does not yet implement branch competition, reorgs, or full fork choice. The short design note is in [docs/FORK_CHOICE_POLICY.md](docs/FORK_CHOICE_POLICY.md).
 
+## Monetary model
+
+Current code does not yet implement native QCOIN issuance. Generic assets can be created today, but those assets are not native QCOIN and should not be treated as the reserve asset. The curated direction for native QCOIN is recorded in [docs/MONETARY_POLICY.md](docs/MONETARY_POLICY.md).
+
 ## Node communication
 
 `qcoin-node` now runs its live peer core over `loadngo-proactor` and `loadngo/network`:
