@@ -346,6 +346,33 @@ fn discovery_targets_for(
     targets
 }
 
+fn broadcast_best_effort<I, F>(targets: I, mut send: F) -> Result<(), String>
+where
+    I: IntoIterator<Item = SocketAddr>,
+    F: FnMut(SocketAddr) -> Result<(), String>,
+{
+    let mut attempts = 0usize;
+    let mut successes = 0usize;
+    let mut failures = Vec::new();
+
+    for target in targets {
+        attempts += 1;
+        match send(target) {
+            Ok(()) => successes += 1,
+            Err(err) => failures.push(format!("{target}: {err}")),
+        }
+    }
+
+    if attempts > 0 && successes == 0 && !failures.is_empty() {
+        return Err(format!(
+            "failed to send to all {attempts} peer(s): {}",
+            failures.join("; ")
+        ));
+    }
+
+    Ok(())
+}
+
 fn normalize_peer_endpoint(peer: &str) -> &str {
     peer.trim()
         .trim_end_matches('/')
@@ -792,10 +819,9 @@ where
     }
 
     fn broadcast_tip_requests(&self) -> Result<(), String> {
-        for peer in self.known_peers() {
-            self.send_wire(peer, crate::wire::WireMessage::TipRequest)?;
-        }
-        Ok(())
+        broadcast_best_effort(self.known_peers(), |peer| {
+            self.send_wire(peer, crate::wire::WireMessage::TipRequest)
+        })
     }
 
     fn broadcast_transaction_announce(&self, tx_id: Hash256) -> Result<(), String> {
@@ -1246,7 +1272,9 @@ fn is_would_block(err: &Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{discovery_targets_for, resolve_peer_addrs, CoreConfig, NodeService};
+    use super::{
+        broadcast_best_effort, discovery_targets_for, resolve_peer_addrs, CoreConfig, NodeService,
+    };
     use crate::{
         blocks_path_from_state_path, default_chain_state, load_block_history, load_chain_state,
         write_file_atomically, NodeRuntime,
@@ -1291,6 +1319,47 @@ mod tests {
         assert_eq!(resolved.len(), 2);
         assert!(resolved.contains(&"127.0.0.1:9800".parse().unwrap()));
         assert!(resolved.contains(&"127.0.0.1:9900".parse().unwrap()));
+    }
+
+    #[test]
+    fn broadcast_best_effort_continues_after_failure() {
+        let peers = vec![
+            "127.0.0.1:9800".parse().unwrap(),
+            "127.0.0.1:9801".parse().unwrap(),
+        ];
+        let mut attempted = Vec::new();
+
+        let result = broadcast_best_effort(peers.clone(), |peer| {
+            attempted.push(peer);
+            if peer == peers[0] {
+                Err("stale peer".to_string())
+            } else {
+                Ok(())
+            }
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(attempted, peers);
+    }
+
+    #[test]
+    fn broadcast_best_effort_reports_when_all_peers_fail() {
+        let peers = vec![
+            "127.0.0.1:9800".parse().unwrap(),
+            "127.0.0.1:9801".parse().unwrap(),
+        ];
+        let mut attempted = Vec::new();
+
+        let err = broadcast_best_effort(peers.clone(), |peer| {
+            attempted.push(peer);
+            Err(format!("send failure for {peer}"))
+        })
+        .unwrap_err();
+
+        assert_eq!(attempted, peers);
+        assert!(err.contains("failed to send to all 2 peer(s)"));
+        assert!(err.contains("127.0.0.1:9800"));
+        assert!(err.contains("127.0.0.1:9801"));
     }
 
     #[test]

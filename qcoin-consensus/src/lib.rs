@@ -119,19 +119,77 @@ impl DummyConsensusEngine {
     }
 
     fn expected_proposer(&self, height: u64) -> Result<&PublicKey, ConsensusError> {
-        if self.validators.is_empty() {
-            return Err(ConsensusError::Other("validator set is empty".to_string()));
-        }
-
-        let index = ((height - 1) as usize) % self.validators.len();
-        self.validators
-            .get(index)
-            .ok_or_else(|| ConsensusError::Other("invalid proposer index".to_string()))
+        expected_proposer_for_validators(&self.validators, height)
     }
 
     pub fn can_propose_next_block(&self, chain: &ChainState) -> Result<bool, ConsensusError> {
         Ok(self.expected_proposer(chain.height + 1)? == &self.public_key)
     }
+}
+
+fn expected_proposer_for_validators(
+    validators: &[PublicKey],
+    height: u64,
+) -> Result<&PublicKey, ConsensusError> {
+    if validators.is_empty() {
+        return Err(ConsensusError::Other("validator set is empty".to_string()));
+    }
+
+    let index = ((height - 1) as usize) % validators.len();
+    validators
+        .get(index)
+        .ok_or_else(|| ConsensusError::Other("invalid proposer index".to_string()))
+}
+
+pub fn validate_replayed_block<R>(
+    registry: &R,
+    chain: &ChainState,
+    block: &Block,
+    validators: &[PublicKey],
+) -> Result<(), ConsensusError>
+where
+    R: PqSchemeRegistry + ?Sized,
+{
+    if block.header.height != chain.height + 1 {
+        return Err(ConsensusError::InvalidBlock);
+    }
+
+    if block.header.parent_hash != chain.tip_hash {
+        return Err(ConsensusError::InvalidBlock);
+    }
+
+    if block.header.timestamp <= chain.last_timestamp {
+        return Err(ConsensusError::InvalidBlock);
+    }
+
+    if !validators.is_empty() {
+        let expected_proposer = expected_proposer_for_validators(validators, block.header.height)?;
+        if block.proposer_public_key != *expected_proposer {
+            return Err(ConsensusError::InvalidBlock);
+        }
+    }
+
+    let expected_tx_root = compute_tx_root(&block.transactions);
+    if block.header.tx_root != expected_tx_root {
+        return Err(ConsensusError::InvalidBlock);
+    }
+
+    let expected_state_root = compute_state_root(chain, &block.transactions, block.header.height)?;
+    if block.header.state_root != expected_state_root {
+        return Err(ConsensusError::InvalidBlock);
+    }
+
+    let header_bytes = consensus_codec::encode_block_header(&block.header);
+
+    let scheme = registry
+        .get(&block.signature.scheme)
+        .ok_or(ConsensusError::SignatureError)?;
+
+    scheme
+        .verify(&block.proposer_public_key, &header_bytes, &block.signature)
+        .map_err(|_| ConsensusError::SignatureError)?;
+
+    Ok(())
 }
 
 fn compute_tx_root(txs: &[Transaction]) -> Hash256 {
@@ -211,45 +269,7 @@ impl ConsensusEngine for DummyConsensusEngine {
     }
 
     fn validate_block(&self, chain: &ChainState, block: &Block) -> Result<(), ConsensusError> {
-        if block.header.height != chain.height + 1 {
-            return Err(ConsensusError::InvalidBlock);
-        }
-
-        if block.header.parent_hash != chain.tip_hash {
-            return Err(ConsensusError::InvalidBlock);
-        }
-
-        if block.header.timestamp <= chain.last_timestamp {
-            return Err(ConsensusError::InvalidBlock);
-        }
-
-        let expected_proposer = self.expected_proposer(block.header.height)?;
-        if block.proposer_public_key != *expected_proposer {
-            return Err(ConsensusError::InvalidBlock);
-        }
-
-        let expected_tx_root = compute_tx_root(&block.transactions);
-        if block.header.tx_root != expected_tx_root {
-            return Err(ConsensusError::InvalidBlock);
-        }
-
-        let expected_state_root =
-            compute_state_root(chain, &block.transactions, block.header.height)?;
-        if block.header.state_root != expected_state_root {
-            return Err(ConsensusError::InvalidBlock);
-        }
-
-        let header_bytes = consensus_codec::encode_block_header(&block.header);
-
-        let scheme = self
-            .scheme(&block.signature.scheme)
-            .ok_or(ConsensusError::SignatureError)?;
-
-        scheme
-            .verify(&block.proposer_public_key, &header_bytes, &block.signature)
-            .map_err(|_| ConsensusError::SignatureError)?;
-
-        Ok(())
+        validate_replayed_block(&self.registry, chain, block, &self.validators)
     }
 }
 
@@ -384,6 +404,43 @@ mod tests {
             .expect("signing should succeed");
 
         let result = engine.validate_block(&chain, &tampered);
+        assert!(matches!(result, Err(ConsensusError::InvalidBlock)));
+    }
+
+    #[test]
+    fn replay_validation_accepts_self_consistent_history_without_explicit_validator_set() {
+        let original_engine = DummyConsensusEngine::default();
+        let replacement_engine = DummyConsensusEngine::default();
+        let chain = ChainState::default();
+
+        let block = original_engine
+            .propose_block(&chain, Vec::new())
+            .expect("block should be proposed");
+
+        let live_validation = replacement_engine.validate_block(&chain, &block);
+        assert!(live_validation.is_err());
+
+        validate_replayed_block(&default_registry(), &chain, &block, &[]).expect(
+            "replay validation should use the block signer when no validator set is configured",
+        );
+    }
+
+    #[test]
+    fn replay_validation_rejects_history_that_conflicts_with_explicit_validator_set() {
+        let original_engine = DummyConsensusEngine::default();
+        let alternate_engine = DummyConsensusEngine::default();
+        let chain = ChainState::default();
+
+        let block = original_engine
+            .propose_block(&chain, Vec::new())
+            .expect("block should be proposed");
+
+        let result = validate_replayed_block(
+            &default_registry(),
+            &chain,
+            &block,
+            &[alternate_engine.public_key.clone()],
+        );
         assert!(matches!(result, Err(ConsensusError::InvalidBlock)));
     }
 }

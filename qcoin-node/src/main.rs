@@ -2,7 +2,7 @@ mod node;
 mod wire;
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
-use qcoin_consensus::{ConsensusEngine, DummyConsensusEngine};
+use qcoin_consensus::{validate_replayed_block, ConsensusEngine, DummyConsensusEngine};
 use qcoin_crypto::{default_registry, PqSchemeRegistry, PrivateKey, PublicKey, SignatureSchemeId};
 use qcoin_ledger::{ChainState, LedgerState, TrackedOutput, UtxoKey};
 use qcoin_script::DeterministicScriptEngine;
@@ -379,6 +379,14 @@ fn run_node(
         validators.is_empty(),
     );
 
+    let (chain, blocks) =
+        match load_or_repair_storage(&state_path, &blocks_path, startup.chain_id, &validators) {
+            Ok(storage) => storage,
+            Err(err) => {
+                eprintln!("{err}");
+                return;
+            }
+        };
     let consensus = match DummyConsensusEngine::from_keys(
         registry,
         public_key.clone(),
@@ -391,14 +399,6 @@ fn run_node(
             return;
         }
     };
-    let (chain, blocks) =
-        match load_or_repair_storage(&state_path, &blocks_path, startup.chain_id, &consensus) {
-            Ok(storage) => storage,
-            Err(err) => {
-                eprintln!("{err}");
-                return;
-            }
-        };
 
     println!("Node signer pubkey (hex): {}", node_public_key_hex);
     println!(
@@ -1510,12 +1510,12 @@ fn load_or_repair_storage(
     state_path: &Path,
     blocks_path: &Path,
     expected_chain_id: u32,
-    consensus: &DummyConsensusEngine,
+    validators: &[PublicKey],
 ) -> Result<(ChainState, Vec<Block>), String> {
     let stored_chain = load_chain_state(state_path)?;
     let stored_blocks = load_block_history(blocks_path)?.unwrap_or_default();
     let rebuilt_chain =
-        rebuild_chain_state_from_blocks(&stored_blocks, expected_chain_id, consensus)?;
+        rebuild_chain_state_from_blocks(&stored_blocks, expected_chain_id, validators)?;
 
     let state_differs = match &stored_chain {
         Some(chain) => {
@@ -1550,13 +1550,14 @@ fn load_or_repair_storage(
 fn rebuild_chain_state_from_blocks(
     blocks: &[Block],
     expected_chain_id: u32,
-    consensus: &DummyConsensusEngine,
+    validators: &[PublicKey],
 ) -> Result<ChainState, String> {
     let mut chain = default_chain_state_with_id(expected_chain_id);
+    let registry = default_registry();
     let script_engine = DeterministicScriptEngine::default();
 
     for (index, block) in blocks.iter().enumerate() {
-        consensus.validate_block(&chain, block).map_err(|err| {
+        validate_replayed_block(&registry, &chain, block, validators).map_err(|err| {
             format!(
                 "block history entry {} failed validation while rebuilding state: {err}",
                 index + 1
@@ -1749,12 +1750,13 @@ fn decode_hex_nibble(byte: u8) -> Result<u8, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_chain_state, default_multicast_v6_configs, load_chain_state,
-        load_or_initialize_chain_state, load_or_repair_storage, merge_unique_hex_strings,
-        resolve_produce_mode, save_block_history, save_chain_state, write_file_atomically,
-        ChainState,
+        default_chain_state, default_chain_state_with_id, default_multicast_v6_configs,
+        load_chain_state, load_or_initialize_chain_state, load_or_repair_storage,
+        merge_unique_hex_strings, resolve_produce_mode, save_block_history, save_chain_state,
+        write_file_atomically, ChainState, DEFAULT_CHAIN_ID,
     };
     use qcoin_consensus::{ConsensusEngine, DummyConsensusEngine};
+    use qcoin_crypto::{default_registry, PqSchemeRegistry, SignatureSchemeId};
     use qcoin_ledger::{TrackedOutput, UtxoKey};
     use qcoin_script::DeterministicScriptEngine;
     use qcoin_types::{AssetAmount, AssetDefinition, AssetId, AssetKind, Output};
@@ -1870,8 +1872,7 @@ mod tests {
 
         save_block_history(&blocks_path, &[block]).unwrap();
 
-        let (chain, blocks) =
-            load_or_repair_storage(&state_path, &blocks_path, 0, &consensus).unwrap();
+        let (chain, blocks) = load_or_repair_storage(&state_path, &blocks_path, 0, &[]).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(chain.height, 1);
 
@@ -1895,7 +1896,7 @@ mod tests {
         save_block_history(&blocks_path, &[]).unwrap();
 
         let (repaired_chain, repaired_blocks) =
-            load_or_repair_storage(&state_path, &blocks_path, 0, &consensus).unwrap();
+            load_or_repair_storage(&state_path, &blocks_path, 0, &[]).unwrap();
         assert!(repaired_blocks.is_empty());
         assert_eq!(repaired_chain.height, 0);
 
@@ -1966,11 +1967,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let state_path = dir.path().join("state.json");
         let blocks_path = dir.path().join("blocks.json");
-        let consensus = DummyConsensusEngine::default();
 
         write_file_atomically(&blocks_path, br#"{"not":"valid block history"}"#).unwrap();
 
-        let err = load_or_repair_storage(&state_path, &blocks_path, 0, &consensus).unwrap_err();
+        let err = load_or_repair_storage(&state_path, &blocks_path, 0, &[]).unwrap_err();
         assert!(err.contains("failed to parse block history"));
     }
 
@@ -1979,11 +1979,66 @@ mod tests {
         let dir = tempdir().unwrap();
         let state_path = dir.path().join("state.json");
         let blocks_path = dir.path().join("blocks.json");
-        let consensus = DummyConsensusEngine::default();
 
         write_file_atomically(&state_path, br#"{"not":"valid chain state"}"#).unwrap();
 
-        let err = load_or_repair_storage(&state_path, &blocks_path, 0, &consensus).unwrap_err();
+        let err = load_or_repair_storage(&state_path, &blocks_path, 0, &[]).unwrap_err();
         assert!(err.contains("failed to parse chain state"));
+    }
+
+    #[test]
+    fn load_or_repair_storage_rebuilds_history_with_different_local_signer_when_no_validator_set() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let blocks_path = dir.path().join("blocks.json");
+        let original_consensus = DummyConsensusEngine::default();
+        let block = original_consensus
+            .propose_block(&default_chain_state(), Vec::new())
+            .unwrap();
+
+        let replacement_registry = default_registry();
+        let replacement_scheme = replacement_registry
+            .get(&SignatureSchemeId::Dilithium2)
+            .unwrap();
+        let (replacement_public_key, replacement_private_key) =
+            replacement_scheme.keygen().unwrap();
+        let replacement_consensus = DummyConsensusEngine::from_keys(
+            replacement_registry,
+            replacement_public_key,
+            replacement_private_key,
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert!(replacement_consensus
+            .validate_block(&default_chain_state_with_id(DEFAULT_CHAIN_ID), &block)
+            .is_err());
+
+        save_block_history(&blocks_path, &[block]).unwrap();
+
+        let (chain, blocks) = load_or_repair_storage(&state_path, &blocks_path, 0, &[]).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(chain.height, 1);
+    }
+
+    #[test]
+    fn load_or_repair_storage_still_enforces_explicit_validator_set() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let blocks_path = dir.path().join("blocks.json");
+        let original_consensus = DummyConsensusEngine::default();
+        let block = original_consensus
+            .propose_block(&default_chain_state(), Vec::new())
+            .unwrap();
+
+        let wrong_registry = default_registry();
+        let wrong_scheme = wrong_registry.get(&SignatureSchemeId::Dilithium2).unwrap();
+        let (wrong_public_key, _) = wrong_scheme.keygen().unwrap();
+
+        save_block_history(&blocks_path, &[block]).unwrap();
+
+        let err =
+            load_or_repair_storage(&state_path, &blocks_path, 0, &[wrong_public_key]).unwrap_err();
+        assert!(err.contains("failed validation while rebuilding state"));
     }
 }
