@@ -128,6 +128,10 @@ impl DummyConsensusEngine {
             .get(index)
             .ok_or_else(|| ConsensusError::Other("invalid proposer index".to_string()))
     }
+
+    pub fn can_propose_next_block(&self, chain: &ChainState) -> Result<bool, ConsensusError> {
+        Ok(self.expected_proposer(chain.height + 1)? == &self.public_key)
+    }
 }
 
 fn compute_tx_root(txs: &[Transaction]) -> Hash256 {

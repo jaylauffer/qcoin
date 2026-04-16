@@ -72,11 +72,15 @@ Current risk:
 - equal-height divergent chains are not reconciled
 - no rollback/reorg mechanism exists
 
+Current documented rule:
+- see [FORK_CHOICE_POLICY.md](FORK_CHOICE_POLICY.md)
+- current qcoin is append-only tip extension, not full fork resolution
+
 Tasks:
 - define chain selection rule
 - add detection for same-height different-tip cases
 - add rollback or alternate branch handling if desired
-- document whether current system is append-only replication or true blockchain fork resolution
+- evolve beyond the current documented append-only replication model if desired
 
 Required tests:
 - two peers with same height and different tips
@@ -130,13 +134,15 @@ Required tests:
 ## Priority 3: transaction flow and product completeness
 
 ### 7. Add transaction submission path
-Current gap:
-- node currently accepts blocks, not user transactions
-- local producer creates empty blocks only
+Current state:
+- node accepts transactions over the UDP qcoin wire
+- transactions land in an in-memory mempool
+- producers stay idle by default unless there is pending work
+- multicast is used for transaction announcement, while full transaction fetch stays unicast
 
 Tasks:
-- design transaction admission endpoint
-- add mempool or staged transaction queue
+- harden transaction admission policy and error reporting
+- decide whether mempool persistence or replay is required for bootstrap nodes
 - validate transactions before inclusion
 - include queued transactions in produced blocks
 - document transaction lifecycle

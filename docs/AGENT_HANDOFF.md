@@ -26,7 +26,7 @@ Near-term priority is:
 - predictable startup/recovery behavior
 - explicit distributed behavior under peer divergence
 - safe validator/config handling
-- transaction admission and mempool only after the above are stabilized
+- harden the now-present transaction admission path and in-memory mempool without pretending it is durable yet
 
 ## Rules of engagement
 
@@ -109,8 +109,9 @@ If the change touches node runtime behavior, also exercise a minimal run path su
 - incompatible file layout without migration notes
 
 ### Peer sync assumptions
-Current long-running sync is simple UDP qcoin-wire replication driven by `loadngo-proactor` and `loadngo/network`, with an explicit hello handshake, optional multicast discovery, and no full fork resolution yet.
+Current long-running sync is simple UDP qcoin-wire replication driven by `loadngo-proactor` and `loadngo/network`, with an explicit hello handshake, optional multicast discovery, transaction announce/fetch over UDP, and no full fork resolution yet.
 HTTP endpoints remain compatibility and inspection surfaces, and `--once` still uses the older HTTP sync path.
+Read [FORK_CHOICE_POLICY.md](FORK_CHOICE_POLICY.md) before changing distributed behavior here.
 If adding divergence detection, keep the reported behavior explicit.
 
 ### Validator handling

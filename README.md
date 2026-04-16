@@ -23,6 +23,10 @@ cargo run -p qcoin-node -- keygen
 
 Runtime artifacts are written under `data/` by default (`data/qcoin-chain-state.json` and matching `*.blocks.json`), and are git-ignored.
 
+## Consensus model
+
+Current `qcoin-node` consensus is deterministic proposer scheduling plus append-only tip extension. It does not yet implement branch competition, reorgs, or full fork choice. The short design note is in [docs/FORK_CHOICE_POLICY.md](docs/FORK_CHOICE_POLICY.md).
+
 ## Node communication
 
 `qcoin-node` now runs its live peer core over `loadngo-proactor` and `loadngo/network`:
@@ -31,10 +35,14 @@ Runtime artifacts are written under `data/` by default (`data/qcoin-chain-state.
 - Static peers are resolved from `--peer` entries, and `http://...` peer URLs are still accepted for compatibility.
 - If you do not supply an explicit multicast config, the node now enables an embedded IPv6 multicast bootstrap profile on `ff02::5143:6f69:6e`.
 - Nodes exchange an explicit `HelloRequest` / `HelloResponse` handshake before normal UDP sync.
+- Transactions are submitted over the UDP qcoin wire and held in an in-memory mempool.
+- Transaction IDs are announced over discovery targets, including the multicast bootstrap group when enabled, and peers fetch full transaction payloads back over unicast UDP.
 - When a node is running normally, peer tip exchange and block propagation happen over the UDP qcoin wire protocol.
-- Multicast is used for discovery and bootstrap only; block sync and block propagation stay unicast after peers are learned.
+- Multicast is used for discovery/bootstrap and transaction announcement only; deterministic transaction fetch, block sync, and block propagation stay unicast after peers are learned.
+- The node currently accepts only blocks that extend its current local tip; equal-height divergent branches are a fault condition, not a resolved normal case.
 - Validator membership comes from a shared `cluster-manifest.json`, while `network-config.json` is now only for optional static peers and network overrides.
 - The HTTP API is still exposed as an adapter for inspection and compatibility tooling.
+- Producers do not mint empty blocks by default. A validator only produces when it has pending transactions unless `--produce-empty-blocks` is set.
 
 HTTP endpoints:
 
@@ -42,6 +50,14 @@ HTTP endpoints:
 - `GET /tip` -> current tip metadata (`height`, `tip_hash_hex`, `state_root_hex`)
 - `GET /blocks/{height}` -> binary (`bincode`) encoded block for 1-based height
 - `POST /blocks` -> submit binary (`bincode`) encoded block
+
+There is intentionally no HTTP transaction submission endpoint. Use the UDP qcoin wire instead:
+
+```bash
+cargo run -p qcoin-node -- submit-tx \
+  --target 127.0.0.1:9710 \
+  --tx-json ./path/to/transaction.json
+```
 
 ### Quick 2-node local test
 
@@ -58,9 +74,12 @@ PUB=$(grep -o '"public_key_hex\": \"[^\"]*\"' /tmp/qcoin_validator.json | cut -d
 cargo run -p qcoin-node -- run \
   --listen 127.0.0.1:9710 \
   --interval-seconds 1 \
+  --produce-empty-blocks \
   --keypair-json /tmp/qcoin_validator.json \
   --validator-public-key-hex "$PUB"
 ```
+
+`--produce-empty-blocks` is only for idle smoke tests. In the normal node path, producers stay idle until they have pending transactions.
 
 3. Sync node B from node A:
 
@@ -82,6 +101,7 @@ For a continuously running second node, the same `--peer` value will now be used
 - `--listen <addr>` shared HTTP/UDP bind address
 - `--sync-interval-seconds <n>` periodic UDP tip-sync interval for the live node core
 - `--produce=<true|false>` explicit role override; if omitted, the node auto-produces only when its local key is in the manifest validator set
+- `--produce-empty-blocks` allow idle validators to keep creating empty blocks; off by default
 - `--cluster-manifest-json <path>` shared chain/bootstrap manifest containing `chain_id`, validator public keys, reliable node keys, and multicast settings
 - `--network-config-json <path>` optional static peer and network override file
 - `--validator-public-key-hex <hex>` legacy validator-set fallback when no manifest is supplied

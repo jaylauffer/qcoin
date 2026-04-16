@@ -93,7 +93,7 @@ Definition of done:
 ---
 
 ## QW-005 Fork-choice policy note
-Status: `todo`
+Status: `done`
 
 Goal:
 - define whether QCoin currently supports fork resolution or append-only replication
@@ -105,6 +105,9 @@ Tasks:
 Definition of done:
 - document exists
 - future agents are not left guessing about intended model
+
+Result:
+- documented in `docs/FORK_CHOICE_POLICY.md`
 
 ---
 
@@ -161,15 +164,16 @@ Definition of done:
 ---
 
 ## QW-009 Transaction submission API design
-Status: `todo`
+Status: `in_progress`
 
 Goal:
 - define how end users or services submit transactions to a node
 
 Tasks:
-- choose endpoint shape
+- document and stabilize the current UDP `SubmitTransaction` / `SubmitTransactionResponse` flow
 - define pre-validation behavior
 - define duplicate detection and response model
+- decide whether a zero-config multicast submitter is needed beyond node-to-node announce/fetch
 
 Definition of done:
 - API design note exists
@@ -178,7 +182,7 @@ Definition of done:
 ---
 
 ## QW-010 Mempool implementation
-Status: `todo`
+Status: `in_progress`
 
 Depends on:
 - QW-009
@@ -187,7 +191,8 @@ Goal:
 - support pending transaction collection and block inclusion
 
 Tasks:
-- add pending transaction queue
+- harden the current in-memory pending transaction queue
+- define restart behavior for uncommitted transactions
 - include pending txs in locally produced blocks
 - reject invalid or duplicate txs
 
