@@ -23,6 +23,10 @@ use std::{
 };
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
+const DEFAULT_CHAIN_ID: u32 = 0;
+const DEFAULT_IPV6_MULTICAST_GROUP: Ipv6Addr =
+    Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0x5143, 0x6f69, 0x6e);
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -48,14 +52,16 @@ enum Commands {
         listen: String,
         #[arg(long)]
         once: bool,
-        #[arg(long, action = ArgAction::Set, default_value_t = true)]
-        produce: bool,
+        #[arg(long, action = ArgAction::Set)]
+        produce: Option<bool>,
         #[arg(long, value_enum, default_value_t = SchemeArg::Dilithium2)]
         scheme: SchemeArg,
         #[arg(long)]
         keypair_json: Option<PathBuf>,
         #[arg(long)]
         network_config_json: Option<PathBuf>,
+        #[arg(long)]
+        cluster_manifest_json: Option<PathBuf>,
         #[arg(long)]
         validator_public_key_hex: Vec<String>,
     },
@@ -95,6 +101,24 @@ struct NetworkConfig {
     #[serde(default)]
     validator_public_key_hex: Vec<String>,
     #[serde(default)]
+    disable_default_multicast: bool,
+    #[serde(default)]
+    multicast_v4: Vec<MulticastV4Config>,
+    #[serde(default)]
+    multicast_v6: Vec<MulticastV6Config>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct ClusterManifest {
+    #[serde(default = "default_chain_id")]
+    chain_id: u32,
+    #[serde(default)]
+    validator_public_key_hex: Vec<String>,
+    #[serde(default)]
+    reliable_node_public_key_hex: Vec<String>,
+    #[serde(default)]
+    disable_default_multicast: bool,
+    #[serde(default)]
     multicast_v4: Vec<MulticastV4Config>,
     #[serde(default)]
     multicast_v6: Vec<MulticastV6Config>,
@@ -124,7 +148,17 @@ struct MulticastV4Config {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct MulticastV6Config {
     group: Ipv6Addr,
-    interface: u32,
+    #[serde(default)]
+    interface: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct StartupProfile {
+    chain_id: u32,
+    validator_public_key_hex: Vec<String>,
+    reliable_node_public_key_hex: Vec<String>,
+    multicast: Vec<network::MulticastConfig>,
+    default_multicast_enabled: bool,
 }
 
 struct NodeRuntime {
@@ -134,25 +168,8 @@ struct NodeRuntime {
     script_engine: DeterministicScriptEngine,
     state_path: PathBuf,
     blocks_path: PathBuf,
-}
-
-impl NetworkConfig {
-    fn multicast_configs(&self) -> Vec<network::MulticastConfig> {
-        let mut configs = Vec::with_capacity(self.multicast_v4.len() + self.multicast_v6.len());
-        configs.extend(self.multicast_v4.iter().copied().map(|entry| {
-            network::MulticastConfig::V4 {
-                group: entry.group,
-                interface: entry.interface,
-            }
-        }));
-        configs.extend(self.multicast_v6.iter().copied().map(|entry| {
-            network::MulticastConfig::V6 {
-                group: entry.group,
-                interface: entry.interface,
-            }
-        }));
-        configs
-    }
+    node_public_key_hex: String,
+    node_is_validator: bool,
 }
 
 fn main() {
@@ -171,6 +188,7 @@ fn main() {
             scheme,
             keypair_json,
             network_config_json,
+            cluster_manifest_json,
             validator_public_key_hex,
         } => run_node(
             interval_seconds,
@@ -184,6 +202,7 @@ fn main() {
             scheme,
             keypair_json,
             network_config_json,
+            cluster_manifest_json,
             validator_public_key_hex,
         ),
         Commands::Keygen { scheme } => generate_keypair(scheme),
@@ -199,33 +218,19 @@ fn run_node(
     peers: Vec<String>,
     listen_addr: String,
     once: bool,
-    produce: bool,
+    produce: Option<bool>,
     scheme: SchemeArg,
     keypair_json: Option<PathBuf>,
     network_config_json: Option<PathBuf>,
+    cluster_manifest_json: Option<PathBuf>,
     validator_public_key_hex: Vec<String>,
 ) {
     let blocks_path = blocks_path.unwrap_or_else(|| blocks_path_from_state_path(&state_path));
 
-    let chain = load_chain_state(&state_path).unwrap_or_else(default_chain_state);
-    let mut blocks = load_block_history(&blocks_path).unwrap_or_default();
-
-    if blocks.len() < chain.height as usize {
-        eprintln!(
-            "Block history ({}) is shorter than chain height ({}). Refusing to start.",
-            blocks.len(),
-            chain.height
-        );
-        return;
-    }
-    if blocks.len() > chain.height as usize {
-        blocks.truncate(chain.height as usize);
-    }
-
     let registry = default_registry();
     let scheme_id: SignatureSchemeId = scheme.into();
     let (public_key, private_key) = match keypair_json {
-        Some(path) => match load_keypair_from_json(&path, scheme_id) {
+        Some(path) => match load_or_create_keypair_from_json(&path, scheme_id, &registry) {
             Ok(keys) => keys,
             Err(err) => {
                 eprintln!("Failed to load keypair {}: {err}", path.display());
@@ -246,41 +251,91 @@ fn run_node(
             }
         }
     };
+    let node_public_key_hex = to_hex(&public_key.bytes);
 
-    let network_config = match network_config_json {
-        Some(path) => match load_network_config(&path) {
-            Ok(config) => config,
-            Err(err) => {
-                eprintln!("Failed to load network config {}: {err}", path.display());
-                return;
-            }
-        },
-        None => NetworkConfig::default(),
+    let network_config = match load_optional_network_config(network_config_json.as_deref()) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
+    };
+    let cluster_manifest = match load_optional_cluster_manifest(cluster_manifest_json.as_deref()) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
+    };
+    let bind_addr = match node::resolve_bind_addr(&listen_addr) {
+        Ok(bind_addr) => bind_addr,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
+    };
+    let startup = match resolve_startup_profile(
+        bind_addr,
+        network_config.as_ref(),
+        cluster_manifest.as_ref(),
+        &validator_public_key_hex,
+        &node_public_key_hex,
+    ) {
+        Ok(startup) => startup,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
     };
 
-    let multicast_configs = network_config.multicast_configs();
     let self_peer_url = format!("http://{}", listen_addr.trim_end_matches('/'));
-    let peers = merge_unique_strings(network_config.peers, peers)
-        .into_iter()
-        .filter(|peer| !same_peer_endpoint(peer, &self_peer_url))
-        .collect::<Vec<_>>();
-    let validator_public_key_hex = merge_unique_strings(
-        network_config.validator_public_key_hex,
-        validator_public_key_hex,
-    );
-
-    let validators = match parse_validators(&validator_public_key_hex, scheme_id) {
-        Ok(mut vals) => {
-            if vals.is_empty() {
-                vals.push(public_key.clone());
-            }
-            vals
-        }
+    let peers = merge_unique_strings(
+        network_config
+            .as_ref()
+            .map(|config| config.peers.clone())
+            .unwrap_or_default(),
+        peers,
+    )
+    .into_iter()
+    .filter(|peer| !same_peer_endpoint(peer, &self_peer_url))
+    .collect::<Vec<_>>();
+    let validators = match parse_validators(&startup.validator_public_key_hex, scheme_id) {
+        Ok(vals) => vals,
         Err(err) => {
             eprintln!("Failed to parse validator keys: {err}");
             return;
         }
     };
+    let node_is_validator = startup
+        .validator_public_key_hex
+        .iter()
+        .any(|validator| validator == &node_public_key_hex);
+    let produce_enabled = resolve_produce_mode(
+        produce,
+        cluster_manifest.is_some(),
+        node_is_validator,
+        validators.is_empty(),
+    );
+
+    let chain = match load_or_initialize_chain_state(&state_path, startup.chain_id) {
+        Ok(chain) => chain,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
+    };
+    let mut blocks = load_block_history(&blocks_path).unwrap_or_default();
+    if blocks.len() < chain.height as usize {
+        eprintln!(
+            "Block history ({}) is shorter than chain height ({}). Refusing to start.",
+            blocks.len(),
+            chain.height
+        );
+        return;
+    }
+    if blocks.len() > chain.height as usize {
+        blocks.truncate(chain.height as usize);
+    }
 
     let consensus = match DummyConsensusEngine::from_keys(
         registry,
@@ -295,7 +350,26 @@ fn run_node(
         }
     };
 
-    println!("Node signer pubkey (hex): {}", to_hex(&public_key.bytes));
+    println!("Node signer pubkey (hex): {}", node_public_key_hex);
+    println!(
+        "Node role: {}",
+        if node_is_validator {
+            if produce_enabled {
+                "validator+producer"
+            } else {
+                "validator"
+            }
+        } else {
+            "observer"
+        }
+    );
+    println!("Chain ID: {}", startup.chain_id);
+    if startup.default_multicast_enabled {
+        println!(
+            "Using embedded IPv6 multicast discovery group {}",
+            DEFAULT_IPV6_MULTICAST_GROUP
+        );
+    }
     println!("Node state path: {}", state_path.display());
     println!("Node blocks path: {}", blocks_path.display());
 
@@ -306,11 +380,13 @@ fn run_node(
         script_engine: DeterministicScriptEngine::default(),
         state_path,
         blocks_path,
+        node_public_key_hex,
+        node_is_validator,
     }));
 
     if once {
         sync_all_peers_http(&runtime, &peers);
-        if produce {
+        if produce_enabled {
             let _ = produce_one_block(&runtime);
         }
         if let Ok(runtime) = runtime.lock() {
@@ -328,9 +404,13 @@ fn run_node(
     };
     println!("HTTP API listening on http://{listen_addr}");
     let http_node_info = match runtime.lock() {
-        Ok(runtime) => {
-            wire::local_node_hello(runtime.chain.chain_id, !multicast_configs.is_empty())
-        }
+        Ok(runtime) => wire::local_node_hello(
+            runtime.chain.chain_id,
+            !startup.multicast.is_empty(),
+            runtime.node_public_key_hex.clone(),
+            runtime.node_is_validator,
+            produce_enabled,
+        ),
         Err(err) => {
             eprintln!("Failed to lock runtime for node info: {err}");
             return;
@@ -338,13 +418,6 @@ fn run_node(
     };
 
     let shutdown_requested = Arc::new(AtomicBool::new(false));
-    let bind_addr = match node::resolve_bind_addr(&listen_addr) {
-        Ok(bind_addr) => bind_addr,
-        Err(err) => {
-            eprintln!("{err}");
-            return;
-        }
-    };
     let peer_addrs = match node::resolve_peer_addrs(&peers, bind_addr) {
         Ok(peer_addrs) => peer_addrs,
         Err(err) => {
@@ -383,10 +456,11 @@ fn run_node(
         node::CoreConfig {
             bind_addr,
             peers: peer_addrs,
-            multicast: multicast_configs,
+            multicast: startup.multicast,
             sync_interval: Duration::from_secs(sync_interval_seconds.max(1)),
             produce_interval: Duration::from_secs(interval_seconds.max(1)),
-            produce,
+            produce: produce_enabled,
+            reliable_node_public_key_hex: startup.reliable_node_public_key_hex,
         },
         Arc::clone(&shutdown_requested),
     ) {
@@ -501,7 +575,13 @@ fn sync_from_peer_http(runtime: &Arc<Mutex<NodeRuntime>>, peer: &str) -> Result<
         let runtime = runtime
             .lock()
             .map_err(|err| format!("failed to lock runtime before node-info request: {err}"))?;
-        wire::local_node_hello(runtime.chain.chain_id, false)
+        wire::local_node_hello(
+            runtime.chain.chain_id,
+            false,
+            runtime.node_public_key_hex.clone(),
+            runtime.node_is_validator,
+            false,
+        )
     };
     let node_info_url = format!("{base}/node-info");
     let remote_hello: wire::NodeHello = ureq::get(&node_info_url)
@@ -628,6 +708,42 @@ fn parse_validators(
     Ok(validators)
 }
 
+fn default_chain_id() -> u32 {
+    DEFAULT_CHAIN_ID
+}
+
+fn load_or_create_keypair_from_json(
+    path: &Path,
+    expected_scheme: SignatureSchemeId,
+    registry: &impl PqSchemeRegistry,
+) -> Result<(PublicKey, PrivateKey), String> {
+    if path.exists() {
+        return load_keypair_from_json(path, expected_scheme);
+    }
+
+    let Some(sig_scheme) = registry.get(&expected_scheme) else {
+        return Err(format!("signing scheme {expected_scheme} is not available"));
+    };
+    let (public_key, private_key) = sig_scheme.keygen().map_err(|err| err.to_string())?;
+    save_keypair_to_json(path, &public_key, &private_key)?;
+    println!("Generated node keypair at {}", path.display());
+    Ok((public_key, private_key))
+}
+
+fn save_keypair_to_json(
+    path: &Path,
+    public_key: &PublicKey,
+    private_key: &PrivateKey,
+) -> Result<(), String> {
+    let output = KeypairOutput {
+        scheme: scheme_name(public_key.scheme),
+        public_key_hex: to_hex(&public_key.bytes),
+        private_key_hex: to_hex(&private_key.bytes),
+    };
+    let payload = serde_json::to_string_pretty(&output).map_err(|err| err.to_string())?;
+    write_file_atomically(path, payload.as_bytes())
+}
+
 fn load_keypair_from_json(
     path: &Path,
     expected_scheme: SignatureSchemeId,
@@ -660,9 +776,245 @@ fn load_keypair_from_json(
     Ok((public_key, private_key))
 }
 
+fn load_optional_network_config(path: Option<&Path>) -> Result<Option<NetworkConfig>, String> {
+    match path {
+        Some(path) => load_network_config(path)
+            .map(Some)
+            .map_err(|err| format!("Failed to load network config {}: {err}", path.display())),
+        None => Ok(None),
+    }
+}
+
 fn load_network_config(path: &Path) -> Result<NetworkConfig, String> {
     let text = fs::read_to_string(path).map_err(|err| err.to_string())?;
     serde_json::from_str(&text).map_err(|err| err.to_string())
+}
+
+fn load_optional_cluster_manifest(path: Option<&Path>) -> Result<Option<ClusterManifest>, String> {
+    match path {
+        Some(path) => load_cluster_manifest(path)
+            .map(Some)
+            .map_err(|err| format!("Failed to load cluster manifest {}: {err}", path.display())),
+        None => Ok(None),
+    }
+}
+
+fn load_cluster_manifest(path: &Path) -> Result<ClusterManifest, String> {
+    let text = fs::read_to_string(path).map_err(|err| err.to_string())?;
+    serde_json::from_str(&text).map_err(|err| err.to_string())
+}
+
+fn resolve_startup_profile(
+    bind_addr: std::net::SocketAddr,
+    network_config: Option<&NetworkConfig>,
+    cluster_manifest: Option<&ClusterManifest>,
+    cli_validator_public_key_hex: &[String],
+    node_public_key_hex: &str,
+) -> Result<StartupProfile, String> {
+    let validator_public_key_hex = if let Some(manifest) = cluster_manifest {
+        merge_unique_hex_strings(manifest.validator_public_key_hex.clone(), Vec::new())
+    } else {
+        merge_unique_hex_strings(
+            network_config
+                .map(|config| config.validator_public_key_hex.clone())
+                .unwrap_or_default(),
+            cli_validator_public_key_hex.to_vec(),
+        )
+    };
+    let reliable_node_public_key_hex = cluster_manifest
+        .map(|manifest| normalize_hex_strings(manifest.reliable_node_public_key_hex.clone()))
+        .unwrap_or_default();
+    let (multicast, default_multicast_enabled) =
+        resolve_multicast_configs(bind_addr, network_config, cluster_manifest)?;
+
+    let is_validator = validator_public_key_hex
+        .iter()
+        .any(|validator| validator == node_public_key_hex);
+    if cluster_manifest.is_some() && !is_validator && reliable_node_public_key_hex.is_empty() {
+        println!("No reliable node list configured; discovered peers will be treated equally");
+    }
+
+    Ok(StartupProfile {
+        chain_id: cluster_manifest
+            .map(|manifest| manifest.chain_id)
+            .unwrap_or(DEFAULT_CHAIN_ID),
+        validator_public_key_hex,
+        reliable_node_public_key_hex,
+        multicast,
+        default_multicast_enabled,
+    })
+}
+
+fn resolve_multicast_configs(
+    bind_addr: std::net::SocketAddr,
+    network_config: Option<&NetworkConfig>,
+    cluster_manifest: Option<&ClusterManifest>,
+) -> Result<(Vec<network::MulticastConfig>, bool), String> {
+    if let Some(config) = network_config {
+        if !config.multicast_v4.is_empty() || !config.multicast_v6.is_empty() {
+            return expand_multicast_configs(
+                bind_addr,
+                &config.multicast_v4,
+                &config.multicast_v6,
+                false,
+            )
+            .map(|configs| (configs, false));
+        }
+    }
+
+    if let Some(manifest) = cluster_manifest {
+        if !manifest.multicast_v4.is_empty() || !manifest.multicast_v6.is_empty() {
+            return expand_multicast_configs(
+                bind_addr,
+                &manifest.multicast_v4,
+                &manifest.multicast_v6,
+                false,
+            )
+            .map(|configs| (configs, false));
+        }
+    }
+
+    if network_config.is_some_and(|config| config.disable_default_multicast)
+        || cluster_manifest.is_some_and(|manifest| manifest.disable_default_multicast)
+    {
+        return Ok((Vec::new(), false));
+    }
+
+    let defaults = default_multicast_v6_configs();
+    match expand_multicast_configs(bind_addr, &[], &defaults, true) {
+        Ok(configs) => Ok((configs, true)),
+        Err(err) => {
+            eprintln!("Default multicast bootstrap disabled: {err}");
+            Ok((Vec::new(), true))
+        }
+    }
+}
+
+fn default_multicast_v6_configs() -> Vec<MulticastV6Config> {
+    vec![MulticastV6Config {
+        group: DEFAULT_IPV6_MULTICAST_GROUP,
+        interface: None,
+    }]
+}
+
+fn expand_multicast_configs(
+    bind_addr: std::net::SocketAddr,
+    v4: &[MulticastV4Config],
+    v6: &[MulticastV6Config],
+    best_effort_auto: bool,
+) -> Result<Vec<network::MulticastConfig>, String> {
+    let mut configs = Vec::with_capacity(v4.len() + v6.len());
+    for entry in v4.iter().copied() {
+        configs.push(network::MulticastConfig::V4 {
+            group: entry.group,
+            interface: entry.interface,
+        });
+    }
+
+    for entry in v6.iter().copied() {
+        let interfaces = match entry.interface {
+            Some(interface) => vec![interface],
+            None => match resolve_ipv6_multicast_interfaces(bind_addr) {
+                Ok(interfaces) => interfaces,
+                Err(_err) if best_effort_auto => continue,
+                Err(err) => return Err(err),
+            },
+        };
+        for interface in interfaces {
+            let resolved = network::MulticastConfig::V6 {
+                group: entry.group,
+                interface,
+            };
+            if !configs.contains(&resolved) {
+                configs.push(resolved);
+            }
+        }
+    }
+
+    Ok(configs)
+}
+
+fn resolve_ipv6_multicast_interfaces(bind_addr: std::net::SocketAddr) -> Result<Vec<u32>, String> {
+    if let std::net::SocketAddr::V6(addr) = bind_addr {
+        if addr.scope_id() != 0 {
+            return Ok(vec![addr.scope_id()]);
+        }
+    }
+    discover_ipv6_multicast_interfaces()
+}
+
+#[cfg(unix)]
+fn discover_ipv6_multicast_interfaces() -> Result<Vec<u32>, String> {
+    use std::ptr;
+
+    let mut head = ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return Err(format!(
+            "failed to inspect local interfaces: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let mut non_loopback = Vec::new();
+    let mut loopback = Vec::new();
+    let mut cursor = head;
+    while !cursor.is_null() {
+        let entry = unsafe { &*cursor };
+        if !entry.ifa_addr.is_null()
+            && unsafe { (*entry.ifa_addr).sa_family as i32 } == libc::AF_INET6
+        {
+            let flags = entry.ifa_flags as i32;
+            let is_up = flags & libc::IFF_UP as i32 != 0;
+            let supports_multicast = flags & libc::IFF_MULTICAST as i32 != 0;
+            let is_loopback = flags & libc::IFF_LOOPBACK as i32 != 0;
+            if is_up && supports_multicast {
+                let index = unsafe { libc::if_nametoindex(entry.ifa_name) };
+                if index != 0 {
+                    let target = if is_loopback {
+                        &mut loopback
+                    } else {
+                        &mut non_loopback
+                    };
+                    if !target.contains(&index) {
+                        target.push(index);
+                    }
+                }
+            }
+        }
+        cursor = entry.ifa_next;
+    }
+    unsafe { libc::freeifaddrs(head) };
+
+    if !non_loopback.is_empty() {
+        return Ok(non_loopback);
+    }
+    if !loopback.is_empty() {
+        return Ok(loopback);
+    }
+    Err("no IPv6 multicast-capable interfaces found".to_string())
+}
+
+#[cfg(not(unix))]
+fn discover_ipv6_multicast_interfaces() -> Result<Vec<u32>, String> {
+    Err(
+        "automatic IPv6 multicast interface discovery is not available on this platform"
+            .to_string(),
+    )
+}
+
+fn resolve_produce_mode(
+    explicit: Option<bool>,
+    has_manifest: bool,
+    node_is_validator: bool,
+    validators_empty: bool,
+) -> bool {
+    if let Some(explicit) = explicit {
+        return explicit;
+    }
+    if node_is_validator {
+        return true;
+    }
+    !has_manifest && validators_empty
 }
 
 fn merge_unique_strings(primary: Vec<String>, extra: Vec<String>) -> Vec<String> {
@@ -679,7 +1031,33 @@ fn merge_unique_strings(primary: Vec<String>, extra: Vec<String>) -> Vec<String>
     merged
 }
 
+fn merge_unique_hex_strings(primary: Vec<String>, extra: Vec<String>) -> Vec<String> {
+    normalize_hex_strings(primary.into_iter().chain(extra).collect())
+}
+
+fn normalize_hex_strings(values: Vec<String>) -> Vec<String> {
+    let mut merged = Vec::new();
+    for value in values {
+        let normalized = value.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        if !merged
+            .iter()
+            .any(|existing: &String| existing == &normalized)
+        {
+            merged.push(normalized);
+        }
+    }
+    merged
+}
+
+#[cfg(test)]
 fn default_chain_state() -> ChainState {
+    default_chain_state_with_id(DEFAULT_CHAIN_ID)
+}
+
+fn default_chain_state_with_id(chain_id: u32) -> ChainState {
     let ledger = LedgerState {
         utxos: Default::default(),
         assets: Default::default(),
@@ -691,7 +1069,23 @@ fn default_chain_state() -> ChainState {
         tip_hash: [0u8; 32],
         state_root,
         last_timestamp: 0,
-        chain_id: 0,
+        chain_id,
+    }
+}
+
+fn load_or_initialize_chain_state(
+    path: &Path,
+    expected_chain_id: u32,
+) -> Result<ChainState, String> {
+    match load_chain_state(path) {
+        Some(chain) if chain.chain_id == expected_chain_id => Ok(chain),
+        Some(chain) => Err(format!(
+            "chain state {} has chain_id {}, expected {}",
+            path.display(),
+            chain.chain_id,
+            expected_chain_id
+        )),
+        None => Ok(default_chain_state_with_id(expected_chain_id)),
     }
 }
 
@@ -811,5 +1205,62 @@ fn decode_hex_nibble(byte: u8) -> Result<u8, String> {
         b'a'..=b'f' => Ok(byte - b'a' + 10),
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => Err(format!("invalid hex character '{}'", byte as char)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        default_multicast_v6_configs, load_or_initialize_chain_state, merge_unique_hex_strings,
+        resolve_produce_mode, write_file_atomically, ChainState,
+    };
+    use std::net::Ipv6Addr;
+    use tempfile::tempdir;
+
+    #[test]
+    fn produce_mode_auto_enables_manifest_validator() {
+        assert!(resolve_produce_mode(None, true, true, false));
+        assert!(!resolve_produce_mode(None, true, false, false));
+    }
+
+    #[test]
+    fn produce_mode_preserves_single_node_dev_default() {
+        assert!(resolve_produce_mode(None, false, false, true));
+        assert!(!resolve_produce_mode(None, false, false, false));
+    }
+
+    #[test]
+    fn merge_unique_hex_strings_normalizes_case() {
+        let merged = merge_unique_hex_strings(
+            vec!["AA".to_string(), "bb".to_string()],
+            vec!["aa".to_string(), " BB ".to_string(), "cc".to_string()],
+        );
+        assert_eq!(merged, vec!["aa", "bb", "cc"]);
+    }
+
+    #[test]
+    fn default_multicast_uses_embedded_group() {
+        let configs = default_multicast_v6_configs();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(
+            configs[0].group,
+            "ff02::5143:6f69:6e".parse::<Ipv6Addr>().unwrap()
+        );
+        assert_eq!(configs[0].interface, None);
+    }
+
+    #[test]
+    fn load_or_initialize_chain_state_rejects_chain_id_mismatch() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let chain = ChainState {
+            chain_id: 7,
+            ..Default::default()
+        };
+        let payload = serde_json::to_vec(&chain).unwrap();
+        write_file_atomically(&state_path, &payload).unwrap();
+
+        let err = load_or_initialize_chain_state(&state_path, 9).unwrap_err();
+        assert!(err.contains("chain_id"));
     }
 }

@@ -37,7 +37,7 @@ sudo install -m 0600 /tmp/node-keypair.json /etc/qcoin/node-keypair.json
 
 Extract and save the `public_key_hex` from `10.10.10.1` and `10.10.10.2`. Those two public keys are the initial validator set.
 
-`10.10.10.3` still needs a local keypair file at `/etc/qcoin/node-keypair.json` even when running with `QCOIN_PRODUCE=false`; the service launch script requires `QCOIN_KEYPAIR_JSON` to exist on every node.
+`10.10.10.3` should still have a stable local key at `/etc/qcoin/node-keypair.json`. If the file is missing, `qcoin-node` now generates and persists one automatically on first start.
 
 If `10.10.10.3` is later cleaned and promoted to a validator, generate a third keypair there and update the validator set on all nodes.
 
@@ -53,7 +53,7 @@ sudo install -m 0644 deploy/qcoin-node.service /etc/systemd/system/qcoin-node.se
 
 ## Phase 4: Render per-node config files
 
-Use `deploy/render-node-config.sh` to generate the local `qcoin-node.env` and `network-config.json`.
+Use `deploy/render-node-config.sh` to generate the local `qcoin-node.env`, a shared `cluster-manifest.json`, and an optional `network-config.json` when you want static peers in addition to multicast discovery.
 
 Example for `10.10.10.1` as a producer:
 
@@ -63,9 +63,8 @@ Example for `10.10.10.1` as a producer:
   --output-dir /tmp/qcoin-config-10.10.10.1 \
   --validator-public-key-hex PUBKEY_FOR_10_10_10_1 \
   --validator-public-key-hex PUBKEY_FOR_10_10_10_2 \
-  --multicast-v6-group ff02::5143:6f69:6e \
-  --multicast-v6-interface 2 \
-  --produce true
+  --reliable-node-public-key-hex PUBKEY_FOR_10_10_10_1 \
+  --reliable-node-public-key-hex PUBKEY_FOR_10_10_10_2
 ```
 
 Example for `10.10.10.2` as a producer:
@@ -76,9 +75,8 @@ Example for `10.10.10.2` as a producer:
   --output-dir /tmp/qcoin-config-10.10.10.2 \
   --validator-public-key-hex PUBKEY_FOR_10_10_10_1 \
   --validator-public-key-hex PUBKEY_FOR_10_10_10_2 \
-  --multicast-v6-group ff02::5143:6f69:6e \
-  --multicast-v6-interface 2 \
-  --produce true
+  --reliable-node-public-key-hex PUBKEY_FOR_10_10_10_1 \
+  --reliable-node-public-key-hex PUBKEY_FOR_10_10_10_2
 ```
 
 Example for `10.10.10.3` as an observer:
@@ -89,22 +87,27 @@ Example for `10.10.10.3` as an observer:
   --output-dir /tmp/qcoin-config-10.10.10.3 \
   --validator-public-key-hex PUBKEY_FOR_10_10_10_1 \
   --validator-public-key-hex PUBKEY_FOR_10_10_10_2 \
-  --multicast-v6-group ff02::5143:6f69:6e \
-  --multicast-v6-interface 2 \
   --produce false
 ```
 
-Use the same multicast group on every node. The interface index is machine-local; verify it on each host with `ip -6 link show` rather than assuming `2` everywhere.
-In the current node model, multicast only handles discovery. Once peers respond, block sync and propagation continue over unicast UDP.
+The rendered manifest uses the default multicast group `ff02::5143:6f69:6e`. Leave the interface unset to let Unix hosts auto-discover multicast-capable IPv6 interfaces, or pass `--multicast-v6-interface` if you want to pin one NIC. In the current node model, multicast only handles discovery. Once peers respond, block sync and propagation continue over unicast UDP.
+
+The first two nodes do not need `QCOIN_PRODUCE=true` in the env file. Because their keys are in the manifest validator set, they auto-produce by default. `10.10.10.3` is forced to observer mode with `--produce false`.
 
 Install the rendered files on each machine:
 
 ```bash
 sudo install -m 0644 /tmp/qcoin-config-10.10.10.X/qcoin-node.env /etc/qcoin/qcoin-node.env
-sudo install -m 0644 /tmp/qcoin-config-10.10.10.X/network-config.json /etc/qcoin/network-config.json
+sudo install -m 0644 /tmp/qcoin-config-10.10.10.X/cluster-manifest.json /etc/qcoin/cluster-manifest.json
 ```
 
 Replace `10.10.10.X` with the local machine IP.
+
+If you rendered a static peer file, install it too:
+
+```bash
+sudo install -m 0644 /tmp/qcoin-config-10.10.10.X/network-config.json /etc/qcoin/network-config.json
+```
 
 ## Phase 5: Start qcoin
 
@@ -154,6 +157,6 @@ Use this sequence when you want to keep the cluster minimal:
 1. Keep qcoin as the minimal cluster: two producers and one observer.
 2. Develop EAB features against `10.10.10.1:8080`.
 3. Verify mirrored qcoin progress via `GET /tip` on `10.10.10.1:9700`.
-4. Only after the `10.10.10.3` host and network path are verified, add its public key to every node's `validator_public_key_hex` array and switch it to `QCOIN_PRODUCE=true`.
+4. Only after the `10.10.10.3` host and network path are verified, add its public key to the shared `cluster-manifest.json` validator list on every node and remove the explicit `QCOIN_PRODUCE=false` override there.
 
 That keeps hardware requirements flat while preserving a realistic multi-node workflow.

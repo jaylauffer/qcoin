@@ -12,6 +12,7 @@ pub struct NodeHello {
     pub min_compatible_wire_version: u16,
     pub software_version: String,
     pub chain_id: u32,
+    pub node_public_key_hex: String,
     pub capabilities: Vec<String>,
 }
 
@@ -27,16 +28,29 @@ pub enum WireMessage {
     SubmitBlockResponse(SubmitBlockResponse),
 }
 
-pub fn local_node_hello(chain_id: u32, multicast_enabled: bool) -> NodeHello {
+pub fn local_node_hello(
+    chain_id: u32,
+    multicast_enabled: bool,
+    node_public_key_hex: String,
+    validator: bool,
+    producer: bool,
+) -> NodeHello {
     let mut capabilities = vec!["udp-qcoin-wire".to_string(), "http-api".to_string()];
     if multicast_enabled {
         capabilities.push("multicast-discovery".to_string());
+    }
+    if validator {
+        capabilities.push("validator".to_string());
+    }
+    if producer {
+        capabilities.push("block-producer".to_string());
     }
     NodeHello {
         wire_version: WIRE_VERSION,
         min_compatible_wire_version: MIN_COMPATIBLE_WIRE_VERSION,
         software_version: env!("CARGO_PKG_VERSION").to_string(),
         chain_id,
+        node_public_key_hex,
         capabilities,
     }
 }
@@ -106,7 +120,7 @@ mod tests {
 
     #[test]
     fn wire_round_trips_hello_response() {
-        let hello = local_node_hello(7, true);
+        let hello = local_node_hello(7, true, "abcd".to_string(), true, true);
         let encoded = encode(&WireMessage::HelloResponse(hello.clone())).unwrap();
         let decoded = decode(&encoded).unwrap();
         assert_eq!(decoded, WireMessage::HelloResponse(hello));
@@ -119,6 +133,7 @@ mod tests {
             min_compatible_wire_version: WIRE_VERSION + 1,
             software_version: "9.9.9".to_string(),
             chain_id: 0,
+            node_public_key_hex: "abcd".to_string(),
             capabilities: Vec::new(),
         };
         let err = ensure_version_compatible(&remote).unwrap_err();
@@ -127,7 +142,7 @@ mod tests {
 
     #[test]
     fn hello_compatibility_rejects_chain_id_mismatch() {
-        let remote = local_node_hello(9, false);
+        let remote = local_node_hello(9, false, "abcd".to_string(), false, false);
         let err = ensure_hello_compatible(3, &remote).unwrap_err();
         assert!(err.contains("chain id"));
     }
