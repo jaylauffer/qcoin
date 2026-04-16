@@ -34,7 +34,7 @@ Current code does not yet implement native QCOIN issuance. Generic assets can be
 ## EAB role
 
 For the current proof-of-concept direction, qcoin should sit behind `entitlement-achievement-blockchain` as an auditable proof layer. The qcoin-side anchoring contract for EAB is recorded in [docs/EAB_ANCHOR_TRANSACTION_MODEL.md](docs/EAB_ANCHOR_TRANSACTION_MODEL.md).
-The operational handoff point from qcoin bring-up to EAB-first work is recorded in [docs/QCOIN_EXIT_GATE.md](docs/QCOIN_EXIT_GATE.md).
+The operational handoff point from qcoin bring-up to EAB-first work is recorded in [docs/QCOIN_EXIT_GATE.md](docs/QCOIN_EXIT_GATE.md). The current three-node lab passed that gate on `2026-04-16`; treat qcoin as active infrastructure work rather than the main blocker unless the gate needs to be re-opened.
 
 ## Node communication
 
@@ -119,18 +119,31 @@ For a continuously running second node, the same `--peer` value will now be used
 - `--keypair-json <path>` signer keypair file from `keygen`
 - `--blocks-path <path>` explicit block history persistence path
 
-## Manual systemd deployment
+## Service deployment
 
-The repo contains deploy artifacts for running `qcoin-node` as a boot-time service:
+The repo contains deploy artifacts for running `qcoin-node` as a managed service:
 
 - `deploy/qcoin-node.service`
 - `deploy/qcoin-node-launch.sh`
 - `deploy/qcoin-node.env.example`
+- `deploy/qcoin-node.mac.env.example`
+- `deploy/com.loadngo.qcoin-node.plist`
 - `deploy/cluster-manifest.example.json`
 - `deploy/network-config.10.10.10.1.example.json`
 - `deploy/render-node-config.sh`
 
-For a concrete `10.10.10.1` / `10.10.10.2` / `10.10.10.3` bring-up sequence, including an observer-only `10.10.10.3` and EAB integration, see [three-node-eab-workflow.md](docs/three-node-eab-workflow.md).
+Platform split:
+
+- Linux nodes use `systemd` via `deploy/qcoin-node.service`
+- macOS nodes can use the checked-in user LaunchAgent template
+  `deploy/com.loadngo.qcoin-node.plist`
+
+For the current real three-machine lab service bootstrap, see
+[LAB_SERVICE_BOOTSTRAP.md](docs/LAB_SERVICE_BOOTSTRAP.md).
+
+For the older generic `10.10.10.1` / `10.10.10.2` / `10.10.10.3` bring-up
+sequence, including an observer-only third node and EAB integration, see
+[three-node-eab-workflow.md](docs/three-node-eab-workflow.md).
 
 The recommended layout on a machine is:
 
@@ -142,6 +155,16 @@ The recommended layout on a machine is:
 - `/etc/qcoin/node-keypair.json`
 - `/var/lib/qcoin/` for chain state and blocks
 - `/var/log/qcoin/` for service logs
+
+For macOS user-level launchd:
+
+- `~/Library/LaunchAgents/com.loadngo.qcoin-node.plist`
+- `~/.config/qcoin/qcoin-node.env`
+- `~/Library/Logs/qcoin/`
+
+The shared launcher now also supports `QCOIN_ENV_FILE`, so `launchd` can point
+the same `deploy/qcoin-node-launch.sh` at a user-managed env file instead of a
+`systemd` `EnvironmentFile`.
 
 Persistence note:
 - local block history is authoritative

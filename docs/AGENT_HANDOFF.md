@@ -84,6 +84,7 @@ Good examples of note topics:
 - fork-choice policy
 - monetary policy
 - qcoin exit gate
+- lab service bootstrap
 - EAB anchor transaction model
 - validator ordering semantics
 - EAB integration contract
@@ -93,6 +94,10 @@ If touching `deploy/`, verify that:
 - filenames still match docs
 - flags still match `qcoin-node --help` behavior
 - examples still reflect current runtime assumptions
+
+Current operator runbooks:
+- [LAB_SERVICE_BOOTSTRAP.md](LAB_SERVICE_BOOTSTRAP.md) for the real three-node service-managed lab
+- [three-node-eab-workflow.md](three-node-eab-workflow.md) for the older generic three-node walkthrough
 
 ## Build and validation expectations
 
@@ -179,6 +184,7 @@ When handing off work, include:
 
 Do not assume the current mirroring behavior is the final contract.
 Read [QCOIN_EXIT_GATE.md](QCOIN_EXIT_GATE.md) before deciding qcoin bring-up work is complete enough to deprioritize.
+Current status: the live three-node lab passed the exit gate on `2026-04-16`; re-open it only if the cluster stops meeting those checks after further changes.
 Read [EAB_ANCHOR_TRANSACTION_MODEL.md](EAB_ANCHOR_TRANSACTION_MODEL.md) first.
 If changing interaction between the two repos, document:
 - what EAB is allowed to submit

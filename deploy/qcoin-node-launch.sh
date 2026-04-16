@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ -n "${QCOIN_ENV_FILE:-}" ]]; then
+  if [[ ! -f "${QCOIN_ENV_FILE}" ]]; then
+    echo "QCOIN_ENV_FILE points to missing file: ${QCOIN_ENV_FILE}" >&2
+    exit 1
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  source "${QCOIN_ENV_FILE}"
+  set +a
+fi
+
 : "${QCOIN_BINARY:?QCOIN_BINARY is required}"
 : "${QCOIN_WORKDIR:?QCOIN_WORKDIR is required}"
 : "${QCOIN_STATE_PATH:?QCOIN_STATE_PATH is required}"
@@ -13,12 +24,16 @@ QCOIN_SYNC_INTERVAL_SECONDS="${QCOIN_SYNC_INTERVAL_SECONDS:-3}"
 QCOIN_PRODUCE="${QCOIN_PRODUCE:-}"
 QCOIN_PRODUCE_EMPTY_BLOCKS="${QCOIN_PRODUCE_EMPTY_BLOCKS:-}"
 QCOIN_SCHEME="${QCOIN_SCHEME:-dilithium2}"
+QCOIN_LOG_DIR="${QCOIN_LOG_DIR:-}"
 
 mkdir -p \
   "$(dirname "$QCOIN_STATE_PATH")" \
   "$(dirname "$QCOIN_BLOCKS_PATH")" \
-  "$(dirname "$QCOIN_KEYPAIR_JSON")" \
-  /var/log/qcoin
+  "$(dirname "$QCOIN_KEYPAIR_JSON")"
+
+if [[ -n "${QCOIN_LOG_DIR}" ]]; then
+  mkdir -p "${QCOIN_LOG_DIR}"
+fi
 
 run_args=(
   run

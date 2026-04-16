@@ -7,6 +7,28 @@ cluster.
 This is an operational gate for the current three-device lab, not a statement
 that qcoin is feature-complete.
 
+## Current lab status
+
+Status: `passed` on `2026-04-16`
+
+Validated on the real service-managed lab nodes:
+
+- `linux-node-a` via `systemd`
+- `linux-node-b` via `systemd`
+- `macos-node` via `launchd`
+
+Verification snapshot at the close of the gate check:
+
+- all three nodes reported `height: 4`
+- all three nodes reported `tip_hash_hex: 7d2ce57f5d73ef15c2ebc5b9c70e20207d7b20e239ffdd52e58e8f1238199973`
+- all three nodes reported `state_root_hex: 0a0c974fceadd63bb761f58459ee21342455d99b0cb5e6d3117f92d91630c2a7`
+- transaction submission was exercised through all three nodes individually
+- stderr line counts stayed flat for a full `45s` idle window after the runtime/service fixes
+
+This status is specific to the current lab bootstrap cluster and should be
+re-validated if service layout, manifest contents, storage paths, or node
+runtime behavior changes materially.
+
 ## The decision rule
 
 Shift primary focus from qcoin core bring-up to EAB work when qcoin is
@@ -20,9 +42,9 @@ on the actual devices.
 
 Current expected lab nodes:
 
-- `192.168.1.140`
-- `192.168.1.123`
-- `192.168.1.146`
+- `linux-node-a`
+- `linux-node-b`
+- `macos-node`
 
 All checks below refer to that real three-node cluster, not a single-machine
 simulation.
