@@ -134,6 +134,12 @@ The recommended layout on a machine is:
 - `/var/lib/qcoin/` for chain state and blocks
 - `/var/log/qcoin/` for service logs
 
+Persistence note:
+- local block history is authoritative
+- chain state is rebuilt and repaired from block history on startup if the two files disagree
+- malformed persistence files still stop startup with an explicit error
+- see [PERSISTENCE_MODEL.md](docs/PERSISTENCE_MODEL.md)
+
 ### 1. Build the release binary
 
 ```bash
