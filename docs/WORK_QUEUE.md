@@ -273,6 +273,52 @@ Definition of done:
 
 ---
 
+## QW-015 Monetary policy definition
+Status: `done`
+
+Goal:
+- define native QCOIN clearly enough that future code changes stop conflating it with generic assets
+
+Tasks:
+- separate native QCOIN from `CreateAsset`-based assets
+- record the intended source of supply
+- define how fees and validator rewards fit into the first real monetary model
+
+Definition of done:
+- curated note exists under `docs/`
+- README links to it
+- future agents have one source of truth
+
+Result:
+- documented in `docs/MONETARY_POLICY.md`
+- current repo truth is explicit: generic asset minting is not native QCOIN issuance
+- chosen v1 direction is genesis allocations plus protocol block rewards, with fees flowing through the same reward path once enabled
+
+---
+
+## QW-016 Native QCOIN implementation
+Status: `todo`
+
+Depends on:
+- QW-015
+
+Goal:
+- implement native QCOIN as a protocol asset instead of relying on generic asset issuance paths
+
+Tasks:
+- reserve a `QCOIN_ASSET_ID`
+- add genesis allocation support
+- add protocol reward semantics
+- prevent `CreateAsset` and zero-input flows from minting native supply
+- define first-pass fee handling
+
+Definition of done:
+- native QCOIN has protocol-defined supply rules
+- invalid native-issuance attempts are rejected
+- tests cover genesis, rewards, fees, and conservation
+
+---
+
 ## Suggested near-term execution order
 1. QW-001
 2. QW-002
@@ -282,6 +328,7 @@ Definition of done:
 6. QW-008
 7. QW-009
 8. QW-010
-9. QW-012
-10. QW-013
-11. QW-014
+9. QW-016
+10. QW-012
+11. QW-013
+12. QW-014

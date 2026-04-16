@@ -24,6 +24,11 @@ The node currently supports:
 - HTTP compatibility sync for `--once`
 - persisted chain state and block history
 
+Current monetary-policy truth:
+- generic asset issuance exists today
+- native QCOIN monetary policy is documented in [MONETARY_POLICY.md](MONETARY_POLICY.md)
+- native QCOIN issuance is not implemented yet
+
 ## Priority 0: preserve integrity and recoverability
 
 ### 1. Make persistence crash-safe
@@ -152,6 +157,7 @@ Required tests:
 ### 8. Expand script and asset workflow coverage
 Tasks:
 - review `qcoin-ledger` asset and script invariants
+- separate generic asset issuance from future native QCOIN rules
 - identify missing transaction kinds and asset lifecycle rules
 - define metadata and issuer authorization expectations more fully
 
