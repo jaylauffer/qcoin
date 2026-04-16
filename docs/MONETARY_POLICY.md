@@ -34,6 +34,10 @@ Rules:
 - generic assets keep their own issuer-controlled lifecycle
 - generic asset supply rules do not apply to QCOIN
 
+Current reserved identifier choice:
+- `QCOIN_ASSET_ID` is the ASCII literal `loadngo`, zero-padded to 32 bytes
+- this is only the canonical native asset identifier; it does not by itself create supply
+
 Generic assets remain the right tool for:
 - game currencies
 - items

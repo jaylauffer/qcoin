@@ -190,6 +190,9 @@ Known concern:
 - EAB mirroring currently uses a fresh default dummy consensus engine when anchoring locally
 - that may not align with a real qcoin-node validator set used for remote submission
 
+Current design note:
+- see [EAB_ANCHOR_TRANSACTION_MODEL.md](EAB_ANCHOR_TRANSACTION_MODEL.md)
+
 Tasks:
 - define supported integration contract between EAB and QCoin
 - decide whether EAB should:

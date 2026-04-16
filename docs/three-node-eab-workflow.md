@@ -144,6 +144,9 @@ cargo run -p qcoin-node -- submit-tx \
   --tx-json ./path/to/transaction.json
 ```
 
+Before moving on to EAB-first work, evaluate the cluster against
+[QCOIN_EXIT_GATE.md](QCOIN_EXIT_GATE.md).
+
 ## Phase 6: Bring up EAB against qcoin
 
 Run the EAB service on the most trusted machine first. In this lab, `10.10.10.1` is the simplest anchor node.

@@ -225,7 +225,7 @@ Definition of done:
 ---
 
 ## QW-012 QCoin + EAB integration contract
-Status: `todo`
+Status: `done`
 
 Goal:
 - make integration expectations explicit
@@ -238,6 +238,11 @@ Tasks:
 Definition of done:
 - written contract exists under `docs/`
 - mismatch behavior is explicit
+
+Result:
+- documented in `docs/EAB_ANCHOR_TRANSACTION_MODEL.md`
+- PoC contract is now explicit: EAB submits anchor transactions, not blocks
+- current mismatch is explicit: local dummy block proposal is a bootstrap shortcut, not the intended stable integration model
 
 ---
 
@@ -257,7 +262,28 @@ Definition of done:
 
 ---
 
-## QW-014 Deployment/runbook cleanup
+## QW-014 QCoin exit gate
+Status: `done`
+
+Goal:
+- define the exact point at which qcoin cluster bring-up stops being the main blocker and EAB work should take priority
+
+Tasks:
+- define the three-node operational checks
+- state the accepted bootstrap limitations explicitly
+- record what work begins after the gate passes
+
+Definition of done:
+- handoff gate exists under `docs/`
+- three-node workflow links to it
+
+Result:
+- documented in `docs/QCOIN_EXIT_GATE.md`
+- the qcoin-to-EAB focus shift is now an explicit lab decision, not a vague judgment call
+
+---
+
+## QW-015 Deployment/runbook cleanup
 Status: `todo`
 
 Goal:
@@ -273,7 +299,7 @@ Definition of done:
 
 ---
 
-## QW-015 Monetary policy definition
+## QW-016 Monetary policy definition
 Status: `done`
 
 Goal:
@@ -296,7 +322,7 @@ Result:
 
 ---
 
-## QW-016 Native QCOIN implementation
+## QW-017 Native QCOIN implementation
 Status: `todo`
 
 Depends on:
@@ -328,7 +354,7 @@ Definition of done:
 6. QW-008
 7. QW-009
 8. QW-010
-9. QW-016
-10. QW-012
-11. QW-013
-12. QW-014
+9. QW-012
+10. QW-013
+11. QW-015
+12. QW-017

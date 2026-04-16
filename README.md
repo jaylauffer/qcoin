@@ -31,6 +31,11 @@ Current `qcoin-node` consensus is deterministic proposer scheduling plus append-
 
 Current code does not yet implement native QCOIN issuance. Generic assets can be created today, but those assets are not native QCOIN and should not be treated as the reserve asset. The curated direction for native QCOIN is recorded in [docs/MONETARY_POLICY.md](docs/MONETARY_POLICY.md).
 
+## EAB role
+
+For the current proof-of-concept direction, qcoin should sit behind `entitlement-achievement-blockchain` as an auditable proof layer. The qcoin-side anchoring contract for EAB is recorded in [docs/EAB_ANCHOR_TRANSACTION_MODEL.md](docs/EAB_ANCHOR_TRANSACTION_MODEL.md).
+The operational handoff point from qcoin bring-up to EAB-first work is recorded in [docs/QCOIN_EXIT_GATE.md](docs/QCOIN_EXIT_GATE.md).
+
 ## Node communication
 
 `qcoin-node` now runs its live peer core over `loadngo-proactor` and `loadngo/network`:
