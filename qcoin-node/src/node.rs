@@ -1547,8 +1547,12 @@ mod tests {
     ) -> Result<NodeRuntime, String> {
         let state_path = base_dir.join("state.json");
         let blocks_path = blocks_path_from_state_path(&state_path);
-        let chain = load_chain_state(&state_path).unwrap_or_else(default_chain_state);
-        let blocks = load_block_history(&blocks_path).unwrap_or_default();
+        let chain = load_chain_state(&state_path)
+            .unwrap()
+            .unwrap_or_else(default_chain_state);
+        let blocks = load_block_history(&blocks_path)
+            .unwrap()
+            .unwrap_or_default();
 
         let registry = default_registry();
         let node_public_key_hex = crate::to_hex(&signer.public_key.bytes);
@@ -1590,8 +1594,12 @@ mod tests {
     ) -> Result<NodeRuntime, String> {
         let state_path = base_dir.join("state.json");
         let blocks_path = blocks_path_from_state_path(&state_path);
-        let chain = load_chain_state(&state_path).unwrap_or_else(default_chain_state);
-        let blocks = load_block_history(&blocks_path).unwrap_or_default();
+        let chain = load_chain_state(&state_path)
+            .unwrap()
+            .unwrap_or_else(default_chain_state);
+        let blocks = load_block_history(&blocks_path)
+            .unwrap()
+            .unwrap_or_default();
 
         let registry = default_registry();
         let scheme = registry

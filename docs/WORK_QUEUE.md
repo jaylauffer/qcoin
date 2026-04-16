@@ -58,7 +58,7 @@ Definition of done:
 ---
 
 ## QW-003 Startup repair policy
-Status: `todo`
+Status: `done`
 
 Goal:
 - define and implement behavior when persisted files disagree
@@ -71,6 +71,11 @@ Tasks:
 Definition of done:
 - mismatch cases handled deterministically
 - tests cover state ahead, blocks ahead, and corruption cases
+
+Result:
+- implemented in `qcoin-node` with block history as the authoritative local record
+- startup replays block history, repairs chain state to match, and refuses malformed persistence files explicitly
+- documented in `docs/PERSISTENCE_MODEL.md`
 
 ---
 

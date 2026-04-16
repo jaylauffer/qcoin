@@ -350,26 +350,6 @@ fn run_node(
         validators.is_empty(),
     );
 
-    let chain = match load_or_initialize_chain_state(&state_path, startup.chain_id) {
-        Ok(chain) => chain,
-        Err(err) => {
-            eprintln!("{err}");
-            return;
-        }
-    };
-    let mut blocks = load_block_history(&blocks_path).unwrap_or_default();
-    if blocks.len() < chain.height as usize {
-        eprintln!(
-            "Block history ({}) is shorter than chain height ({}). Refusing to start.",
-            blocks.len(),
-            chain.height
-        );
-        return;
-    }
-    if blocks.len() > chain.height as usize {
-        blocks.truncate(chain.height as usize);
-    }
-
     let consensus = match DummyConsensusEngine::from_keys(
         registry,
         public_key.clone(),
@@ -382,6 +362,14 @@ fn run_node(
             return;
         }
     };
+    let (chain, blocks) =
+        match load_or_repair_storage(&state_path, &blocks_path, startup.chain_id, &consensus) {
+            Ok(storage) => storage,
+            Err(err) => {
+                eprintln!("{err}");
+                return;
+            }
+        };
 
     println!("Node signer pubkey (hex): {}", node_public_key_hex);
     println!(
@@ -796,19 +784,22 @@ fn apply_block(runtime: &mut NodeRuntime, block: Block) -> Result<u64, String> {
         .validate_block(&runtime.chain, &block)
         .map_err(|err| format!("Failed to validate block: {err}"))?;
 
-    runtime
-        .chain
+    let mut next_chain = runtime.chain.clone();
+    next_chain
         .apply_block(&block, &runtime.script_engine)
         .map_err(|err| format!("Failed to apply block: {err}"))?;
 
-    runtime.blocks.push(block);
+    let mut next_blocks = runtime.blocks.clone();
+    next_blocks.push(block);
+
+    save_block_history(&runtime.blocks_path, &next_blocks)?;
+    save_chain_state(&runtime.state_path, &next_chain)?;
+
+    runtime.chain = next_chain;
+    runtime.blocks = next_blocks;
     reconcile_pending_transactions(runtime);
-    let new_height = runtime.chain.height;
 
-    save_chain_state(&runtime.state_path, &runtime.chain)?;
-    save_block_history(&runtime.blocks_path, &runtime.blocks)?;
-
-    Ok(new_height)
+    Ok(runtime.chain.height)
 }
 
 fn accept_transaction(
@@ -1298,11 +1289,12 @@ fn default_chain_state_with_id(chain_id: u32) -> ChainState {
     }
 }
 
+#[cfg(test)]
 fn load_or_initialize_chain_state(
     path: &Path,
     expected_chain_id: u32,
 ) -> Result<ChainState, String> {
-    match load_chain_state(path) {
+    match load_chain_state(path)? {
         Some(chain) if chain.chain_id == expected_chain_id => Ok(chain),
         Some(chain) => Err(format!(
             "chain state {} has chain_id {}, expected {}",
@@ -1312,6 +1304,73 @@ fn load_or_initialize_chain_state(
         )),
         None => Ok(default_chain_state_with_id(expected_chain_id)),
     }
+}
+
+fn load_or_repair_storage(
+    state_path: &Path,
+    blocks_path: &Path,
+    expected_chain_id: u32,
+    consensus: &DummyConsensusEngine,
+) -> Result<(ChainState, Vec<Block>), String> {
+    let stored_chain = load_chain_state(state_path)?;
+    let stored_blocks = load_block_history(blocks_path)?.unwrap_or_default();
+    let rebuilt_chain =
+        rebuild_chain_state_from_blocks(&stored_blocks, expected_chain_id, consensus)?;
+
+    let state_differs = match &stored_chain {
+        Some(chain) => {
+            if chain.chain_id != expected_chain_id {
+                return Err(format!(
+                    "chain state {} has chain_id {}, expected {}",
+                    state_path.display(),
+                    chain.chain_id,
+                    expected_chain_id
+                ));
+            }
+            chain.height != rebuilt_chain.height
+                || chain.tip_hash != rebuilt_chain.tip_hash
+                || chain.state_root != rebuilt_chain.state_root
+                || chain.last_timestamp != rebuilt_chain.last_timestamp
+        }
+        None => !stored_blocks.is_empty(),
+    };
+
+    if state_differs {
+        let previous_height = stored_chain.as_ref().map(|chain| chain.height).unwrap_or(0);
+        println!(
+            "Repairing chain state from block history: state height {} -> block height {}",
+            previous_height, rebuilt_chain.height
+        );
+        save_chain_state(state_path, &rebuilt_chain)?;
+    }
+
+    Ok((rebuilt_chain, stored_blocks))
+}
+
+fn rebuild_chain_state_from_blocks(
+    blocks: &[Block],
+    expected_chain_id: u32,
+    consensus: &DummyConsensusEngine,
+) -> Result<ChainState, String> {
+    let mut chain = default_chain_state_with_id(expected_chain_id);
+    let script_engine = DeterministicScriptEngine::default();
+
+    for (index, block) in blocks.iter().enumerate() {
+        consensus.validate_block(&chain, block).map_err(|err| {
+            format!(
+                "block history entry {} failed validation while rebuilding state: {err}",
+                index + 1
+            )
+        })?;
+        chain.apply_block(block, &script_engine).map_err(|err| {
+            format!(
+                "block history entry {} failed ledger replay while rebuilding state: {err}",
+                index + 1
+            )
+        })?;
+    }
+
+    Ok(chain)
 }
 
 fn print_tip(runtime: &NodeRuntime) {
@@ -1328,11 +1387,23 @@ fn blocks_path_from_state_path(state_path: &Path) -> PathBuf {
     PathBuf::from(format!("{state}.blocks.json"))
 }
 
-fn load_chain_state(path: &Path) -> Option<ChainState> {
-    let mut file = File::open(path).ok()?;
+fn load_chain_state(path: &Path) -> Result<Option<ChainState>, String> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(format!(
+                "failed to open chain state {}: {err}",
+                path.display()
+            ))
+        }
+    };
     let mut contents = String::new();
-    file.read_to_string(&mut contents).ok()?;
-    serde_json::from_str::<ChainState>(&contents).ok()
+    file.read_to_string(&mut contents)
+        .map_err(|err| format!("failed to read chain state {}: {err}", path.display()))?;
+    serde_json::from_str::<ChainState>(&contents)
+        .map(Some)
+        .map_err(|err| format!("failed to parse chain state {}: {err}", path.display()))
 }
 
 fn save_chain_state(path: &Path, chain: &ChainState) -> Result<(), String> {
@@ -1340,14 +1411,18 @@ fn save_chain_state(path: &Path, chain: &ChainState) -> Result<(), String> {
     write_file_atomically(path, state.as_bytes())
 }
 
-fn load_block_history(path: &Path) -> Option<Vec<Block>> {
+fn load_block_history(path: &Path) -> Result<Option<Vec<Block>>, String> {
     if !path.exists() {
-        return Some(Vec::new());
+        return Ok(None);
     }
-    let mut file = File::open(path).ok()?;
+    let mut file = File::open(path)
+        .map_err(|err| format!("failed to open block history {}: {err}", path.display()))?;
     let mut contents = String::new();
-    file.read_to_string(&mut contents).ok()?;
-    serde_json::from_str::<Vec<Block>>(&contents).ok()
+    file.read_to_string(&mut contents)
+        .map_err(|err| format!("failed to read block history {}: {err}", path.display()))?;
+    serde_json::from_str::<Vec<Block>>(&contents)
+        .map(Some)
+        .map_err(|err| format!("failed to parse block history {}: {err}", path.display()))
 }
 
 fn save_block_history(path: &Path, blocks: &[Block]) -> Result<(), String> {
@@ -1373,7 +1448,32 @@ fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<(), String> {
         file.sync_all().map_err(|err| err.to_string())?;
     }
 
-    fs::rename(&temp_path, path).map_err(|err| err.to_string())
+    fs::rename(&temp_path, path).map_err(|err| err.to_string())?;
+    sync_parent_dir(path)
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    let dir = File::open(parent).map_err(|err| {
+        format!(
+            "failed to open parent directory {}: {err}",
+            parent.display()
+        )
+    })?;
+    dir.sync_all().map_err(|err| {
+        format!(
+            "failed to sync parent directory {}: {err}",
+            parent.display()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 fn generate_keypair(scheme: SchemeArg) {
@@ -1436,9 +1536,13 @@ fn decode_hex_nibble(byte: u8) -> Result<u8, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_multicast_v6_configs, load_or_initialize_chain_state, merge_unique_hex_strings,
-        resolve_produce_mode, write_file_atomically, ChainState,
+        default_chain_state, default_multicast_v6_configs, load_chain_state,
+        load_or_initialize_chain_state, load_or_repair_storage, merge_unique_hex_strings,
+        resolve_produce_mode, save_block_history, save_chain_state, write_file_atomically,
+        ChainState,
     };
+    use qcoin_consensus::{ConsensusEngine, DummyConsensusEngine};
+    use qcoin_script::DeterministicScriptEngine;
     use std::net::Ipv6Addr;
     use tempfile::tempdir;
 
@@ -1487,5 +1591,77 @@ mod tests {
 
         let err = load_or_initialize_chain_state(&state_path, 9).unwrap_err();
         assert!(err.contains("chain_id"));
+    }
+
+    #[test]
+    fn load_or_repair_storage_rebuilds_state_from_block_history() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let blocks_path = dir.path().join("blocks.json");
+        let consensus = DummyConsensusEngine::default();
+        let block = consensus
+            .propose_block(&default_chain_state(), Vec::new())
+            .unwrap();
+
+        save_block_history(&blocks_path, &[block]).unwrap();
+
+        let (chain, blocks) =
+            load_or_repair_storage(&state_path, &blocks_path, 0, &consensus).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(chain.height, 1);
+
+        let repaired = load_chain_state(&state_path).unwrap().unwrap();
+        assert_eq!(repaired.height, 1);
+    }
+
+    #[test]
+    fn load_or_repair_storage_truncates_state_ahead_of_block_history() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let blocks_path = dir.path().join("blocks.json");
+        let consensus = DummyConsensusEngine::default();
+        let mut chain = default_chain_state();
+        let block = consensus.propose_block(&chain, Vec::new()).unwrap();
+        chain
+            .apply_block(&block, &DeterministicScriptEngine::default())
+            .unwrap();
+
+        save_chain_state(&state_path, &chain).unwrap();
+        save_block_history(&blocks_path, &[]).unwrap();
+
+        let (repaired_chain, repaired_blocks) =
+            load_or_repair_storage(&state_path, &blocks_path, 0, &consensus).unwrap();
+        assert!(repaired_blocks.is_empty());
+        assert_eq!(repaired_chain.height, 0);
+
+        let repaired = load_chain_state(&state_path).unwrap().unwrap();
+        assert_eq!(repaired.height, 0);
+        assert_eq!(repaired.tip_hash, [0u8; 32]);
+    }
+
+    #[test]
+    fn load_or_repair_storage_rejects_corrupted_block_history() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let blocks_path = dir.path().join("blocks.json");
+        let consensus = DummyConsensusEngine::default();
+
+        write_file_atomically(&blocks_path, br#"{"not":"valid block history"}"#).unwrap();
+
+        let err = load_or_repair_storage(&state_path, &blocks_path, 0, &consensus).unwrap_err();
+        assert!(err.contains("failed to parse block history"));
+    }
+
+    #[test]
+    fn load_or_repair_storage_rejects_corrupted_chain_state() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let blocks_path = dir.path().join("blocks.json");
+        let consensus = DummyConsensusEngine::default();
+
+        write_file_atomically(&state_path, br#"{"not":"valid chain state"}"#).unwrap();
+
+        let err = load_or_repair_storage(&state_path, &blocks_path, 0, &consensus).unwrap_err();
+        assert!(err.contains("failed to parse chain state"));
     }
 }
