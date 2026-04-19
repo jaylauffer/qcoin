@@ -15,12 +15,13 @@ Usage:
     [--peer-ip 10.10.10.3] \
     [--multicast-v6-group ff02::5143:6f69:6e] \
     [--multicast-v6-interface 2] \
+    [--multicast-v6-interface 7] \
     [--produce true]
 
 Writes:
   - qcoin-node.env
   - cluster-manifest.json
-  - network-config.json (only when --peer-ip is provided)
+  - network-config.json (when --peer-ip or --multicast-v6-interface is provided)
 
 Defaults:
   - chain id: 0
@@ -54,7 +55,7 @@ keypair_json="/etc/qcoin/node-keypair.json"
 cluster_manifest_json="/etc/qcoin/cluster-manifest.json"
 network_config_json="/etc/qcoin/network-config.json"
 multicast_v6_group="ff02::5143:6f69:6e"
-multicast_v6_interface=""
+declare -a multicast_v6_interfaces=()
 declare -a validator_keys=()
 declare -a reliable_keys=()
 declare -a peer_ips=()
@@ -138,7 +139,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --multicast-v6-interface)
-      multicast_v6_interface="${2:-}"
+      multicast_v6_interfaces+=("${2:-}")
       shift 2
       ;;
     --help|-h)
@@ -191,7 +192,7 @@ if [[ -n "$produce" ]]; then
   printf 'QCOIN_PRODUCE=%s\n' "$produce" >>"$env_path"
 fi
 
-if [[ ${#peer_ips[@]} -gt 0 ]]; then
+if [[ ${#peer_ips[@]} -gt 0 || ${#multicast_v6_interfaces[@]} -gt 0 ]]; then
   printf 'QCOIN_NETWORK_CONFIG_JSON=%s\n' "$network_config_json" >>"$env_path"
 fi
 
@@ -218,30 +219,47 @@ fi
   printf '  ],\n'
   printf '  "multicast_v6": [\n'
   printf '    {\n'
-  printf '      "group": "%s"' "$multicast_v6_group"
-  if [[ -n "$multicast_v6_interface" ]]; then
-    printf ',\n'
-    printf '      "interface": %s\n' "$multicast_v6_interface"
-  else
-    printf '\n'
-  fi
+  printf '      "group": "%s"\n' "$multicast_v6_group"
   printf '    }\n'
   printf '  ]\n'
   printf '}\n'
 } >"$manifest_path"
 
-if [[ ${#peer_ips[@]} -gt 0 ]]; then
+if [[ ${#peer_ips[@]} -gt 0 || ${#multicast_v6_interfaces[@]} -gt 0 ]]; then
   {
     printf '{\n'
-    printf '  "peers": [\n'
-    for i in "${!peer_ips[@]}"; do
-      comma=","
-      if [[ "$i" -eq $((${#peer_ips[@]} - 1)) ]]; then
-        comma=""
+    wrote_field=0
+    if [[ ${#peer_ips[@]} -gt 0 ]]; then
+      printf '  "peers": [\n'
+      for i in "${!peer_ips[@]}"; do
+        comma=","
+        if [[ "$i" -eq $((${#peer_ips[@]} - 1)) ]]; then
+          comma=""
+        fi
+        printf '    "%s:%s"%s\n' "${peer_ips[$i]}" "$listen_port" "$comma"
+      done
+      printf '  ]'
+      wrote_field=1
+    fi
+    if [[ ${#multicast_v6_interfaces[@]} -gt 0 ]]; then
+      if [[ "$wrote_field" -eq 1 ]]; then
+        printf ',\n'
       fi
-      printf '    "http://%s:%s"%s\n' "${peer_ips[$i]}" "$listen_port" "$comma"
-    done
-    printf '  ]\n'
+      printf '  "multicast_v6": [\n'
+      for i in "${!multicast_v6_interfaces[@]}"; do
+        comma=","
+        if [[ "$i" -eq $((${#multicast_v6_interfaces[@]} - 1)) ]]; then
+          comma=""
+        fi
+        printf '    {\n'
+        printf '      "group": "%s",\n' "$multicast_v6_group"
+        printf '      "interface": %s\n' "${multicast_v6_interfaces[$i]}"
+        printf '    }%s\n' "$comma"
+      done
+      printf '  ]\n'
+    else
+      printf '\n'
+    fi
     printf '}\n'
   } >"$network_path"
   echo "Wrote $network_path"

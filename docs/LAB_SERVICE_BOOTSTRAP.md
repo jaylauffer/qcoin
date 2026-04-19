@@ -174,9 +174,9 @@ After the services are up, verify all three nodes:
 ```bash
 for ip in <linux_node_a_ip> <linux_node_b_ip> <macos_node_ip>; do
   echo "== $ip =="
-  curl -s "http://$ip:9700/node-info"
+  cargo run -p qcoin-node -- node-info --target "$ip:9700"
   echo
-  curl -s "http://$ip:9700/tip"
+  cargo run -p qcoin-node -- tip --target "$ip:9700"
   echo
 done
 ```
