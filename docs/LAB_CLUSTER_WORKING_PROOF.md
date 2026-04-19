@@ -120,8 +120,8 @@ For `LEDGER_BACKEND=qcoin`, EAB currently does:
 3. persist the anchor into `qcoin_anchor_outbox.json`
 4. have a `loadngo-proactor` worker submit the transaction to qcoin over the
    UDP qcoin wire
-5. use qcoin HTTP block-history inspection to determine whether the exact
-   transaction became included
+5. use qcoin UDP inspection to determine whether the exact transaction became
+   included
 
 Submission transport:
 
