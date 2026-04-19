@@ -15,14 +15,9 @@ use std::{
     io::{Read, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
-    thread,
+    sync::{atomic::AtomicBool, Arc, Mutex},
     time::Duration,
 };
-use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 const DEFAULT_CHAIN_ID: u32 = 0;
 const DEFAULT_IPV6_MULTICAST_GROUP: Ipv6Addr =
@@ -37,7 +32,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run the node, optionally serving and syncing peers
+    /// Run the node over the qcoin UDP wire
     Run {
         #[arg(long, default_value_t = 5)]
         interval_seconds: u64,
@@ -74,6 +69,29 @@ enum Commands {
         tx_json: PathBuf,
         #[arg(long)]
         target: String,
+        #[arg(long, default_value_t = 3)]
+        timeout_seconds: u64,
+    },
+    /// Query a running node's advertised info over the qcoin UDP wire
+    NodeInfo {
+        #[arg(long)]
+        target: String,
+        #[arg(long, default_value_t = 3)]
+        timeout_seconds: u64,
+    },
+    /// Query a running node's current tip over the qcoin UDP wire
+    Tip {
+        #[arg(long)]
+        target: String,
+        #[arg(long, default_value_t = 3)]
+        timeout_seconds: u64,
+    },
+    /// Fetch a block by height from a running node over the qcoin UDP wire
+    Block {
+        #[arg(long)]
+        target: String,
+        #[arg(long)]
+        height: u64,
         #[arg(long, default_value_t = 3)]
         timeout_seconds: u64,
     },
@@ -266,6 +284,19 @@ fn main() {
             target,
             timeout_seconds,
         } => submit_transaction_via_udp(tx_json, target, timeout_seconds),
+        Commands::NodeInfo {
+            target,
+            timeout_seconds,
+        } => query_node_info_via_udp(target, timeout_seconds),
+        Commands::Tip {
+            target,
+            timeout_seconds,
+        } => query_tip_via_udp(target, timeout_seconds),
+        Commands::Block {
+            target,
+            height,
+            timeout_seconds,
+        } => query_block_via_udp(target, height, timeout_seconds),
         Commands::Keygen { scheme } => generate_keypair(scheme),
     }
 }
@@ -350,17 +381,13 @@ fn run_node(
         }
     };
 
-    let self_peer_url = format!("http://{}", listen_addr.trim_end_matches('/'));
     let peers = merge_unique_strings(
         network_config
             .as_ref()
             .map(|config| config.peers.clone())
             .unwrap_or_default(),
         peers,
-    )
-    .into_iter()
-    .filter(|peer| !same_peer_endpoint(peer, &self_peer_url))
-    .collect::<Vec<_>>();
+    );
     let validators = match parse_validators(&startup.validator_public_key_hex, scheme_id) {
         Ok(vals) => vals,
         Err(err) => {
@@ -437,7 +464,20 @@ fn run_node(
     }));
 
     if once {
-        sync_all_peers_http(&runtime, &peers);
+        let local_node_info = match runtime.lock() {
+            Ok(runtime) => wire::local_node_info(
+                runtime.chain.chain_id,
+                !startup.multicast.is_empty(),
+                runtime.node_public_key_hex.clone(),
+                runtime.node_is_validator,
+                produce_enabled,
+            ),
+            Err(err) => {
+                eprintln!("Failed to lock runtime for one-shot sync: {err}");
+                return;
+            }
+        };
+        sync_all_peers_udp(&runtime, &local_node_info, &peers);
         if produce_enabled {
             let _ = produce_one_block(&runtime);
         }
@@ -447,28 +487,6 @@ fn run_node(
         return;
     }
 
-    let server = match Server::http(&listen_addr) {
-        Ok(server) => server,
-        Err(err) => {
-            eprintln!("Failed to bind HTTP server on {listen_addr}: {err}");
-            return;
-        }
-    };
-    println!("HTTP API listening on http://{listen_addr}");
-    let http_node_info = match runtime.lock() {
-        Ok(runtime) => wire::local_node_info(
-            runtime.chain.chain_id,
-            !startup.multicast.is_empty(),
-            runtime.node_public_key_hex.clone(),
-            runtime.node_is_validator,
-            produce_enabled,
-        ),
-        Err(err) => {
-            eprintln!("Failed to lock runtime for node info: {err}");
-            return;
-        }
-    };
-
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     let peer_addrs = match node::resolve_peer_addrs(&peers, bind_addr) {
         Ok(peer_addrs) => peer_addrs,
@@ -477,31 +495,6 @@ fn run_node(
             return;
         }
     };
-
-    let server_runtime = Arc::clone(&runtime);
-    let server_shutdown = Arc::clone(&shutdown_requested);
-    let server_node_info = http_node_info.clone();
-    let server_thread = thread::spawn(move || {
-        while !server_shutdown.load(Ordering::SeqCst) {
-            match server.recv_timeout(Duration::from_millis(100)) {
-                Ok(Some(request)) => {
-                    let mut runtime = match server_runtime.lock() {
-                        Ok(runtime) => runtime,
-                        Err(err) => {
-                            eprintln!("Failed to lock runtime for request handling: {err}");
-                            break;
-                        }
-                    };
-                    handle_request(&mut runtime, &server_node_info, request);
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    eprintln!("HTTP server error: {err}");
-                    break;
-                }
-            }
-        }
-    });
 
     if let Err(err) = node::run_network_core(
         Arc::clone(&runtime),
@@ -517,13 +510,8 @@ fn run_node(
         Arc::clone(&shutdown_requested),
     ) {
         eprintln!("{err}");
-        shutdown_requested.store(true, Ordering::SeqCst);
-        let _ = server_thread.join();
         return;
     }
-
-    shutdown_requested.store(true, Ordering::SeqCst);
-    let _ = server_thread.join();
 }
 
 fn submit_transaction_via_udp(tx_json: PathBuf, target: String, timeout_seconds: u64) {
@@ -615,131 +603,144 @@ fn load_transaction_json(path: &Path) -> Result<Transaction, String> {
         .map_err(|err| format!("Failed to parse transaction JSON {}: {err}", path.display()))
 }
 
-fn handle_request(runtime: &mut NodeRuntime, node_info: &wire::NodeInfo, mut request: Request) {
-    let method = request.method().clone();
-    let path = request.url().split('?').next().unwrap_or("/").to_string();
-
-    match (method, path.as_str()) {
-        (Method::Get, "/node-info") => {
-            let _ = respond_json(request, 200, node_info);
+fn query_node_info_via_udp(target: String, timeout_seconds: u64) {
+    let target_addr = match node::resolve_endpoint_addr(&target) {
+        Ok(addr) => addr,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
         }
-        (Method::Get, "/tip") => {
-            let tip = TipResponse {
-                height: runtime.chain.height,
-                tip_hash_hex: to_hex(&runtime.chain.tip_hash),
-                state_root_hex: to_hex(&runtime.chain.state_root),
-                last_timestamp: runtime.chain.last_timestamp,
-            };
-            let _ = respond_json(request, 200, &tip);
+    };
+    let socket = match bind_query_socket(target_addr, timeout_seconds) {
+        Ok(socket) => socket,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
         }
-        (Method::Get, _) if path.starts_with("/blocks/") => {
-            let height = path
-                .trim_start_matches("/blocks/")
-                .parse::<u64>()
-                .ok()
-                .filter(|h| *h > 0);
-            let Some(height) = height else {
-                let _ = respond_text(request, 400, "height must be >= 1");
-                return;
-            };
-
-            match runtime.blocks.get((height - 1) as usize) {
-                Some(block) => match bincode::serialize(block) {
-                    Ok(payload) => {
-                        let _ = respond_binary(request, 200, payload);
-                    }
-                    Err(err) => {
-                        let _ =
-                            respond_text(request, 500, &format!("failed to encode block: {err}"));
-                    }
-                },
-                None => {
-                    let _ = respond_text(request, 404, "block not found");
-                }
+    };
+    match receive_remote_node_info(&socket, target_addr) {
+        Ok(node_info) => {
+            if let Err(err) = print_json(&node_info) {
+                eprintln!("{err}");
             }
         }
-        (Method::Post, "/blocks") => {
-            let mut body = Vec::new();
-            if let Err(err) = request.as_reader().read_to_end(&mut body) {
-                let _ = respond_text(request, 400, &format!("failed to read request body: {err}"));
-                return;
-            }
-
-            let block: Block = match bincode::deserialize(&body) {
-                Ok(block) => block,
-                Err(err) => {
-                    let _ = respond_text(
-                        request,
-                        400,
-                        &format!("invalid block bincode payload: {err}"),
-                    );
-                    return;
-                }
-            };
-
-            match apply_block(runtime, block) {
-                Ok(height) => {
-                    let response = SubmitBlockResponse {
-                        accepted: true,
-                        height,
-                        message: "block accepted".to_string(),
-                    };
-                    let _ = respond_json(request, 200, &response);
-                }
-                Err(err) => {
-                    let response = SubmitBlockResponse {
-                        accepted: false,
-                        height: runtime.chain.height,
-                        message: err,
-                    };
-                    let _ = respond_json(request, 409, &response);
-                }
-            }
-        }
-        _ => {
-            let _ = respond_text(request, 404, "not found");
-        }
+        Err(err) => eprintln!("{err}"),
     }
 }
 
-fn sync_all_peers_http(runtime: &Arc<Mutex<NodeRuntime>>, peers: &[String]) {
+fn query_tip_via_udp(target: String, timeout_seconds: u64) {
+    let target_addr = match node::resolve_endpoint_addr(&target) {
+        Ok(addr) => addr,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
+    };
+    let socket = match bind_query_socket(target_addr, timeout_seconds) {
+        Ok(socket) => socket,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
+    };
+    let remote_node_info = match receive_remote_node_info(&socket, target_addr) {
+        Ok(node_info) => node_info,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
+    };
+    if let Err(err) = send_probe_node_info(&socket, target_addr, remote_node_info.chain_id) {
+        eprintln!("{err}");
+        return;
+    }
+    if let Err(err) = send_udp_message(&socket, target_addr, wire::WireMessage::TipRequest) {
+        eprintln!("{err}");
+        return;
+    }
+    match wait_for_tip_response(&socket, target_addr) {
+        Ok(tip) => {
+            if let Err(err) = print_json(&tip) {
+                eprintln!("{err}");
+            }
+        }
+        Err(err) => eprintln!("{err}"),
+    }
+}
+
+fn query_block_via_udp(target: String, height: u64, timeout_seconds: u64) {
+    let target_addr = match node::resolve_endpoint_addr(&target) {
+        Ok(addr) => addr,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
+    };
+    let socket = match bind_query_socket(target_addr, timeout_seconds) {
+        Ok(socket) => socket,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
+    };
+    let remote_node_info = match receive_remote_node_info(&socket, target_addr) {
+        Ok(node_info) => node_info,
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
+    };
+    if let Err(err) = send_probe_node_info(&socket, target_addr, remote_node_info.chain_id) {
+        eprintln!("{err}");
+        return;
+    }
+    if let Err(err) = send_udp_message(
+        &socket,
+        target_addr,
+        wire::WireMessage::BlockRequest { height },
+    ) {
+        eprintln!("{err}");
+        return;
+    }
+    match wait_for_block_response(&socket, target_addr, height) {
+        Ok(Some(block)) => {
+            if let Err(err) = print_json(&block) {
+                eprintln!("{err}");
+            }
+        }
+        Ok(None) => eprintln!("Peer {target_addr} does not have block at height {height}"),
+        Err(err) => eprintln!("{err}"),
+    }
+}
+
+fn sync_all_peers_udp(
+    runtime: &Arc<Mutex<NodeRuntime>>,
+    local_node_info: &wire::NodeInfo,
+    peers: &[String],
+) {
     for peer in peers {
-        if let Err(err) = sync_from_peer_http(runtime, peer) {
+        if let Err(err) = sync_from_peer_udp(runtime, local_node_info, peer) {
             eprintln!("Peer sync failed for {peer}: {err}");
         }
     }
 }
 
-fn sync_from_peer_http(runtime: &Arc<Mutex<NodeRuntime>>, peer: &str) -> Result<(), String> {
-    let base = peer.trim_end_matches('/');
-    let local_node_info = {
-        let runtime = runtime
-            .lock()
-            .map_err(|err| format!("failed to lock runtime before node-info request: {err}"))?;
-        wire::local_node_info(
-            runtime.chain.chain_id,
-            false,
-            runtime.node_public_key_hex.clone(),
-            runtime.node_is_validator,
-            false,
-        )
-    };
-    let node_info_url = format!("{base}/node-info");
-    let remote_node_info: wire::NodeInfo = ureq::get(&node_info_url)
-        .timeout(Duration::from_secs(3))
-        .call()
-        .map_err(|err| format!("node-info request failed: {err}"))?
-        .into_json()
-        .map_err(|err| format!("node-info parse failed: {err}"))?;
+fn sync_from_peer_udp(
+    runtime: &Arc<Mutex<NodeRuntime>>,
+    local_node_info: &wire::NodeInfo,
+    peer: &str,
+) -> Result<(), String> {
+    let target_addr = node::resolve_endpoint_addr(peer)?;
+    let socket = bind_query_socket(target_addr, 3)?;
+    let remote_node_info = receive_remote_node_info(&socket, target_addr)?;
     wire::ensure_node_info_compatible(local_node_info.chain_id, &remote_node_info)?;
-
-    let tip_url = format!("{base}/tip");
-    let tip: TipResponse = ureq::get(&tip_url)
-        .timeout(Duration::from_secs(3))
-        .call()
-        .map_err(|err| format!("tip request failed: {err}"))?
-        .into_json()
-        .map_err(|err| format!("tip parse failed: {err}"))?;
+    send_udp_message(
+        &socket,
+        target_addr,
+        wire::WireMessage::NodeInfo(local_node_info.clone()),
+    )?;
+    send_udp_message(&socket, target_addr, wire::WireMessage::TipRequest)?;
+    let tip = wait_for_tip_response(&socket, target_addr)?;
 
     loop {
         let next_height = {
@@ -752,18 +753,15 @@ fn sync_from_peer_http(runtime: &Arc<Mutex<NodeRuntime>>, peer: &str) -> Result<
             runtime.chain.height + 1
         };
 
-        let block_url = format!("{base}/blocks/{next_height}");
-        let response = ureq::get(&block_url)
-            .timeout(Duration::from_secs(3))
-            .call()
-            .map_err(|err| format!("block fetch failed at {next_height}: {err}"))?;
-        let mut block_bytes = Vec::new();
-        response
-            .into_reader()
-            .read_to_end(&mut block_bytes)
-            .map_err(|err| format!("block read failed at {next_height}: {err}"))?;
-        let block: Block = bincode::deserialize(&block_bytes)
-            .map_err(|err| format!("block parse failed at {next_height}: {err}"))?;
+        send_udp_message(
+            &socket,
+            target_addr,
+            wire::WireMessage::BlockRequest {
+                height: next_height,
+            },
+        )?;
+        let block = wait_for_block_response(&socket, target_addr, next_height)?
+            .ok_or_else(|| format!("peer {peer} returned no block at height {next_height}"))?;
 
         let mut runtime = runtime
             .lock()
@@ -771,6 +769,120 @@ fn sync_from_peer_http(runtime: &Arc<Mutex<NodeRuntime>>, peer: &str) -> Result<
         apply_block(&mut runtime, block)?;
     }
 
+    Ok(())
+}
+
+fn bind_query_socket(target_addr: SocketAddr, timeout_seconds: u64) -> Result<UdpSocket, String> {
+    let bind_addr: SocketAddr = match target_addr {
+        SocketAddr::V4(_) => "0.0.0.0:0".parse().expect("valid IPv4 wildcard bind"),
+        SocketAddr::V6(_) => "[::]:0".parse().expect("valid IPv6 wildcard bind"),
+    };
+    let socket = UdpSocket::bind(bind_addr)
+        .map_err(|err| format!("Failed to bind UDP query socket on {bind_addr}: {err}"))?;
+    socket
+        .set_read_timeout(Some(Duration::from_secs(timeout_seconds.max(1))))
+        .map_err(|err| format!("Failed to set UDP query timeout: {err}"))?;
+    Ok(socket)
+}
+
+fn send_udp_message(
+    socket: &UdpSocket,
+    target_addr: SocketAddr,
+    message: wire::WireMessage,
+) -> Result<(), String> {
+    let frame = wire::encode(&message)?;
+    socket
+        .send_to(&frame, target_addr)
+        .map_err(|err| format!("Failed to send UDP message to {target_addr}: {err}"))?;
+    Ok(())
+}
+
+fn receive_remote_node_info(
+    socket: &UdpSocket,
+    target_addr: SocketAddr,
+) -> Result<wire::NodeInfo, String> {
+    send_udp_message(socket, target_addr, wire::WireMessage::PresenceAnnounce)?;
+    loop {
+        match receive_wire_message(socket, target_addr)? {
+            wire::WireMessage::NodeInfo(node_info) => return Ok(node_info),
+            wire::WireMessage::PresenceAnnounce => continue,
+            _ => continue,
+        }
+    }
+}
+
+fn send_probe_node_info(
+    socket: &UdpSocket,
+    target_addr: SocketAddr,
+    chain_id: u32,
+) -> Result<(), String> {
+    send_udp_message(
+        socket,
+        target_addr,
+        wire::WireMessage::NodeInfo(wire::local_node_info(
+            chain_id,
+            false,
+            "probe".to_string(),
+            false,
+            false,
+        )),
+    )
+}
+
+fn wait_for_tip_response(
+    socket: &UdpSocket,
+    target_addr: SocketAddr,
+) -> Result<TipResponse, String> {
+    loop {
+        match receive_wire_message(socket, target_addr)? {
+            wire::WireMessage::TipResponse(tip) => return Ok(tip),
+            wire::WireMessage::PresenceAnnounce | wire::WireMessage::NodeInfo(_) => continue,
+            _ => continue,
+        }
+    }
+}
+
+fn wait_for_block_response(
+    socket: &UdpSocket,
+    target_addr: SocketAddr,
+    expected_height: u64,
+) -> Result<Option<Block>, String> {
+    loop {
+        match receive_wire_message(socket, target_addr)? {
+            wire::WireMessage::BlockResponse { height, block } if height == expected_height => {
+                return Ok(block);
+            }
+            wire::WireMessage::PresenceAnnounce
+            | wire::WireMessage::NodeInfo(_)
+            | wire::WireMessage::TipResponse(_) => continue,
+            _ => continue,
+        }
+    }
+}
+
+fn receive_wire_message(
+    socket: &UdpSocket,
+    target_addr: SocketAddr,
+) -> Result<wire::WireMessage, String> {
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let (len, source) = socket.recv_from(&mut buf).map_err(|err| {
+            format!("Timed out waiting for UDP response from {target_addr}: {err}")
+        })?;
+        if source != target_addr {
+            continue;
+        }
+        match wire::decode(&buf[..len]) {
+            Ok(message) => return Ok(message),
+            Err(err) => eprintln!("Discarding invalid UDP response from {source}: {err}"),
+        }
+    }
+}
+
+fn print_json<T: Serialize>(value: &T) -> Result<(), String> {
+    let rendered = serde_json::to_string_pretty(value)
+        .map_err(|err| format!("Failed to encode JSON: {err}"))?;
+    println!("{rendered}");
     Ok(())
 }
 
@@ -800,11 +912,6 @@ fn produce_one_block(runtime: &Arc<Mutex<NodeRuntime>>) -> Result<Option<(u64, B
         block.transactions.len()
     );
     Ok(Some((height, block)))
-}
-
-fn same_peer_endpoint(peer: &str, self_peer_url: &str) -> bool {
-    peer.trim_end_matches('/')
-        .eq_ignore_ascii_case(self_peer_url)
 }
 
 fn apply_block(runtime: &mut NodeRuntime, block: Block) -> Result<u64, String> {
@@ -916,28 +1023,6 @@ fn transaction_is_committed(runtime: &NodeRuntime, tx_id: Hash256) -> bool {
         .blocks
         .iter()
         .any(|block| block.transactions.iter().any(|tx| tx.tx_id() == tx_id))
-}
-
-fn respond_text(request: Request, status: u16, body: &str) -> std::io::Result<()> {
-    let response = Response::from_string(body.to_string()).with_status_code(StatusCode(status));
-    request.respond(response)
-}
-
-fn respond_json<T: Serialize>(request: Request, status: u16, value: &T) -> std::io::Result<()> {
-    let payload = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
-    let mut response = Response::from_string(payload).with_status_code(StatusCode(status));
-    if let Ok(header) = Header::from_bytes("Content-Type", "application/json") {
-        response.add_header(header);
-    }
-    request.respond(response)
-}
-
-fn respond_binary(request: Request, status: u16, payload: Vec<u8>) -> std::io::Result<()> {
-    let mut response = Response::from_data(payload).with_status_code(StatusCode(status));
-    if let Ok(header) = Header::from_bytes("Content-Type", "application/octet-stream") {
-        response.add_header(header);
-    }
-    request.respond(response)
 }
 
 fn parse_validators(

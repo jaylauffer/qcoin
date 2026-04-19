@@ -13,15 +13,14 @@ QCoin currently contains:
 - `qcoin-node`
 
 The node currently supports:
-- `GET /node-info`
-- `GET /tip`
-- `GET /blocks/{height}`
-- `POST /blocks`
+- `qcoin-node node-info --target <addr>`
+- `qcoin-node tip --target <addr>`
+- `qcoin-node block --target <addr> --height <n>`
 - local block production
 - explicit qcoin presence announce plus node-info compatibility exchange with chain and wire-version checks
 - proactor-driven UDP peer sync for long-running nodes
 - optional IPv6 multicast discovery for peer bootstrap
-- HTTP compatibility sync for `--once`
+- UDP one-shot sync for `--once`
 - persisted chain state and block history
 
 Current monetary-policy truth:

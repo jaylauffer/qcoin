@@ -34,6 +34,8 @@ Current code does not yet implement native QCOIN issuance. Generic assets can be
 ## EAB role
 
 For the current proof-of-concept direction, qcoin should sit behind `entitlement-achievement-blockchain` as an auditable proof layer. The qcoin-side anchoring contract for EAB is recorded in [docs/EAB_ANCHOR_TRANSACTION_MODEL.md](docs/EAB_ANCHOR_TRANSACTION_MODEL.md).
+The current "what has actually been proven on the lab cluster" note is
+recorded in [docs/LAB_CLUSTER_WORKING_PROOF.md](docs/LAB_CLUSTER_WORKING_PROOF.md).
 The operational handoff point from qcoin bring-up to EAB-first work is recorded in [docs/QCOIN_EXIT_GATE.md](docs/QCOIN_EXIT_GATE.md). The current three-node lab passed that gate on `2026-04-16`; treat qcoin as active infrastructure work rather than the main blocker unless the gate needs to be re-opened.
 
 Rollout discipline for `dev` -> lab deployment -> `main` promotion is recorded
@@ -55,17 +57,15 @@ in [ROLLOUT_POLICY.md](docs/ROLLOUT_POLICY.md).
 - Multicast is used for discovery/bootstrap and transaction announcement only; deterministic transaction fetch, block sync, and block propagation stay unicast after peers are learned.
 - The node currently accepts only blocks that extend its current local tip; equal-height divergent branches are a fault condition, not a resolved normal case.
 - Validator membership comes from a shared `cluster-manifest.json`, while `network-config.json` is now only for optional static peers and network overrides.
-- The HTTP API is still exposed as an adapter for inspection and compatibility tooling.
 - Producers do not mint empty blocks by default. A validator only produces when it has pending transactions unless `--produce-empty-blocks` is set.
 
-HTTP endpoints:
+UDP inspection commands:
 
-- `GET /node-info` -> node software version, qcoin wire version, compatibility floor, chain ID, node public key, and capability list
-- `GET /tip` -> current tip metadata (`height`, `tip_hash_hex`, `state_root_hex`)
-- `GET /blocks/{height}` -> binary (`bincode`) encoded block for 1-based height
-- `POST /blocks` -> submit binary (`bincode`) encoded block
+- `qcoin-node node-info --target <addr>` -> node software version, qcoin wire version, compatibility floor, chain ID, node public key, and capability list
+- `qcoin-node tip --target <addr>` -> current tip metadata (`height`, `tip_hash_hex`, `state_root_hex`)
+- `qcoin-node block --target <addr> --height <n>` -> full block payload for 1-based height
 
-There is intentionally no HTTP transaction submission endpoint. Use the UDP qcoin wire instead:
+Use the UDP qcoin wire for transaction submission as well:
 
 ```bash
 cargo run -p qcoin-node -- submit-tx \
@@ -82,7 +82,7 @@ cargo run -p qcoin-node -- keygen > /tmp/qcoin_validator.json
 PUB=$(grep -o '"public_key_hex\": \"[^\"]*\"' /tmp/qcoin_validator.json | cut -d'\"' -f4)
 ```
 
-2. Start node A (producer + API):
+2. Start node A (producer):
 
 ```bash
 cargo run -p qcoin-node -- run \
@@ -101,7 +101,7 @@ cargo run -p qcoin-node -- run \
 cargo run -p qcoin-node -- run \
   --once \
   --produce=false \
-  --peer http://127.0.0.1:9710 \
+  --peer 127.0.0.1:9710 \
   --validator-public-key-hex "$PUB" \
   --state-path data/qcoin_b_state.json \
   --blocks-path data/qcoin_b_blocks.json
@@ -111,8 +111,8 @@ For a continuously running second node, the same `--peer` value will now be used
 
 ### Run flags (selected)
 
-- `--peer <url>` repeatable static peer list (example: `http://127.0.0.1:9710` or `127.0.0.1:9710`)
-- `--listen <addr>` shared HTTP/UDP bind address
+- `--peer <addr>` repeatable static peer list (example: `127.0.0.1:9710`; `http://...` and `udp://...` are still accepted for compatibility parsing)
+- `--listen <addr>` UDP bind address
 - `--sync-interval-seconds <n>` periodic UDP tip-sync interval for the live node core; presence announce runs separately every 42 seconds
 - `--produce=<true|false>` explicit role override; if omitted, the node auto-produces only when its local key is in the manifest validator set
 - `--produce-empty-blocks` allow idle validators to keep creating empty blocks; off by default
@@ -261,8 +261,8 @@ Example:
 ```json
 {
   "peers": [
-    "http://10.10.10.2:9700",
-    "http://10.10.10.3:9700"
+    "10.10.10.2:9700",
+    "10.10.10.3:9700"
   ]
 }
 ```
@@ -325,10 +325,11 @@ tail -f /var/log/qcoin/node.err
 - Every machine in the cluster should have the same `/etc/qcoin/cluster-manifest.json`.
 - `/etc/qcoin/network-config.json` is optional and machine-specific when used.
 - If you keep `multicast_v6`, use the same multicast group on every node. Leaving `interface` unset now makes Unix nodes prefer the interface that owns `--listen`.
+- If a machine should participate on more than one IPv6 segment, add multiple `multicast_v6` entries in that machine's `network-config.json`, one per interface index.
 - If nodes use different local interface indexes, pin `multicast_v6.interface` per node in `network-config.json` instead of hard-coding one shared index into `cluster-manifest.json`.
 - The `validator_public_key_hex` array in the cluster manifest must be identical across all machines, in the same order.
 - The `reliable_node_public_key_hex` list is advisory for bootstrap/sync preference; it does not grant validator rights.
-- Peer URLs should point at reachable private addresses such as `http://10.10.10.x:9700`.
+- Peer entries should point at reachable private addresses such as `10.10.10.x:9700`.
 
 ## Roadmap
 

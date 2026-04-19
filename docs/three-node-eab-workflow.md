@@ -130,10 +130,10 @@ Useful checks:
 
 ```bash
 journalctl -u qcoin-node.service -f
-curl http://10.10.10.1:9700/node-info
-curl http://10.10.10.1:9700/tip
-curl http://10.10.10.2:9700/tip
-curl http://10.10.10.3:9700/tip
+cargo run -p qcoin-node -- node-info --target 10.10.10.1:9700
+cargo run -p qcoin-node -- tip --target 10.10.10.1:9700
+cargo run -p qcoin-node -- tip --target 10.10.10.2:9700
+cargo run -p qcoin-node -- tip --target 10.10.10.3:9700
 ```
 
 For transaction ingress, use the UDP qcoin wire instead of HTTP:
@@ -174,7 +174,7 @@ Use this sequence when you want to keep the cluster minimal:
 
 1. Keep qcoin as the minimal cluster: two producers and one observer.
 2. Develop EAB features against `10.10.10.1:8080`.
-3. Verify mirrored qcoin progress via `GET /tip` on `10.10.10.1:9700`.
+3. Verify mirrored qcoin progress via `qcoin-node tip --target 10.10.10.1:9700`.
 4. Only after the `10.10.10.3` host and network path are verified, add its public key to the shared `cluster-manifest.json` validator list on every node and remove the explicit `QCOIN_PRODUCE=false` override there.
 
 That keeps hardware requirements flat while preserving a realistic multi-node workflow.

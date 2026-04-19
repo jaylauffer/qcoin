@@ -56,7 +56,7 @@ pub fn local_node_info(
     validator: bool,
     producer: bool,
 ) -> NodeInfo {
-    let mut capabilities = vec!["udp-qcoin-wire".to_string(), "http-api".to_string()];
+    let mut capabilities = vec!["udp-qcoin-wire".to_string()];
     if multicast_enabled {
         capabilities.push("multicast-discovery".to_string());
     }
@@ -148,6 +148,13 @@ mod tests {
         let encoded = encode(&WireMessage::NodeInfo(info.clone())).unwrap();
         let decoded = decode(&encoded).unwrap();
         assert_eq!(decoded, WireMessage::NodeInfo(info));
+    }
+
+    #[test]
+    fn local_node_info_reports_udp_capabilities_only() {
+        let info = local_node_info(7, true, "abcd".to_string(), true, true);
+        assert!(info.capabilities.iter().any(|cap| cap == "udp-qcoin-wire"));
+        assert!(!info.capabilities.iter().any(|cap| cap == "http-api"));
     }
 
     #[test]
