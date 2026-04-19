@@ -31,6 +31,22 @@ Near-term priority is:
 
 ## Rules of engagement
 
+### 0. Remote `dev` is the lab authority
+For live lab work, treat the tip of remote `dev` as the current source of
+truth.
+
+Before making claims about:
+- current cluster behavior
+- active network paths
+- inspection surfaces
+- deployment expectations
+
+check the configured remotes directly, for example:
+- `git ls-remote github refs/heads/dev`
+- `git ls-remote gretta refs/heads/dev`
+
+If local `dev` is behind, say so explicitly before reasoning from local code.
+
 ### 1. Do not casually change consensus semantics
 Before changing any of the following, add a short design note under `docs/`:
 - block header fields
@@ -125,7 +141,12 @@ Block history is currently the authoritative local record; chain state is a rebu
 ### Peer sync assumptions
 Current long-running sync is simple UDP qcoin-wire replication driven by `loadngo-proactor` and `loadngo/network`, with a presence announce plus direct node-info exchange, optional multicast discovery, transaction announce/fetch over UDP, and no full fork resolution yet.
 Presence announce is separate from tip sync and should remain low-frequency. Current policy is a 42-second announce against bootstrap targets only, with direct node-info replies rate-limited to once every 42 seconds per source so multicast discovery does not degrade into peer-to-peer chatter.
-HTTP endpoints remain compatibility and inspection surfaces, and `--once` still uses the older HTTP sync path.
+Current operator inspection is over the UDP qcoin wire:
+- `qcoin-node node-info --target <addr:port>`
+- `qcoin-node tip --target <addr:port>`
+- `qcoin-node block --target <addr:port> --height <n>`
+
+Do not assume the old HTTP adapter still exists on live `dev`.
 Read [FORK_CHOICE_POLICY.md](FORK_CHOICE_POLICY.md) before changing distributed behavior here.
 If adding divergence detection, keep the reported behavior explicit.
 
