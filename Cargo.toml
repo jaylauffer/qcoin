@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "qcoin-crypto",
     "qcoin-types",
     "qcoin-script",
     "qcoin-ledger",
@@ -35,7 +34,10 @@ pqcrypto-traits = "0.3"
 zeroize = { version = "1", features = ["alloc"] }
 
 # Internal qcoin workspace dependencies
-qcoin-crypto = { path = "qcoin-crypto" }
+# Moved into loadngo (same owner, BSD-3-Clause) so the dependency runs one way:
+# qcoin depends on loadngo, never the reverse. Aliased so every `use qcoin_crypto::`
+# call site is unchanged.
+qcoin-crypto = { package = "loadngo-pq-crypto", path = "../loadngo/pq-crypto" }
 qcoin-types = { path = "qcoin-types" }
 qcoin-script = { path = "qcoin-script" }
 qcoin-ledger = { path = "qcoin-ledger" }
