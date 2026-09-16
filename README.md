@@ -6,7 +6,10 @@ Follow-up: https://chatgpt.com/share/69248807-3d10-800e-a3d9-22ad6e7aa8a5
 
 ## Crate layout
 
-- **qcoin-crypto** – Post-quantum signature abstractions.
+- **qcoin-crypto** – Post-quantum signature abstractions. The code now
+  lives in `loadngo/pq-crypto` as `loadngo-pq-crypto`, so loadngo no longer
+  depends on this repo; a dependency alias keeps every `use qcoin_crypto::`
+  in these crates working unchanged.
 - **qcoin-types** – Core types for hashes, transactions, blocks, and assets.
 - **qcoin-script** – Minimal scripting language and engine traits.
 - **qcoin-ledger** – In-memory UTXO set and ledger rules.

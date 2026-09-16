@@ -5,7 +5,7 @@ Purpose: give future agents a concrete, execution-oriented checklist for reviewi
 ## Current snapshot
 
 QCoin currently contains:
-- `qcoin-crypto`
+- `qcoin-crypto` (moved to `loadngo/pq-crypto`, consumed here by alias)
 - `qcoin-types`
 - `qcoin-script`
 - `qcoin-ledger`

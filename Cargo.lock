@@ -237,6 +237,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "hex",
+ "loadngo-pq-crypto",
  "ron",
  "serde",
  "serde_json",
@@ -330,6 +332,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "io-uring"
+version = "0.7.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed3bd0ecfbb87805f538bb7b32e5239ca0763890c623e349860ecba69469f2bb"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -364,10 +383,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
+name = "loadngo-anchor"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "loadngo-pq-crypto"
+version = "0.1.0"
+dependencies = [
+ "pqcrypto-dilithium",
+ "pqcrypto-falcon",
+ "pqcrypto-traits",
+ "serde",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
 name = "loadngo-proactor"
 version = "0.1.0"
 dependencies = [
+ "io-uring",
  "libc",
+ "socket2",
  "thiserror",
  "windows",
 ]
@@ -383,8 +426,14 @@ name = "network"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "data",
+ "hex",
+ "loadngo-anchor",
  "loadngo-proactor",
+ "qcoin-types",
+ "serde",
+ "serde_json",
  "socket2",
  "tracing",
  "windows",
@@ -493,24 +542,11 @@ name = "qcoin-consensus"
 version = "0.1.1"
 dependencies = [
  "blake3",
- "qcoin-crypto",
+ "loadngo-pq-crypto",
  "qcoin-ledger",
  "qcoin-script",
  "qcoin-types",
  "thiserror",
-]
-
-[[package]]
-name = "qcoin-crypto"
-version = "0.1.1"
-dependencies = [
- "pqcrypto-dilithium",
- "pqcrypto-falcon",
- "pqcrypto-traits",
- "serde",
- "serde_json",
- "thiserror",
- "zeroize",
 ]
 
 [[package]]
@@ -519,7 +555,7 @@ version = "0.1.1"
 dependencies = [
  "bincode",
  "blake3",
- "qcoin-crypto",
+ "loadngo-pq-crypto",
  "qcoin-script",
  "qcoin-types",
  "serde",
@@ -535,10 +571,10 @@ dependencies = [
  "clap",
  "ctrlc",
  "libc",
+ "loadngo-pq-crypto",
  "loadngo-proactor",
  "network",
  "qcoin-consensus",
- "qcoin-crypto",
  "qcoin-ledger",
  "qcoin-script",
  "qcoin-types",
@@ -552,7 +588,7 @@ name = "qcoin-script"
 version = "0.1.1"
 dependencies = [
  "blake3",
- "qcoin-crypto",
+ "loadngo-pq-crypto",
  "qcoin-types",
  "serde",
  "thiserror",
@@ -563,7 +599,7 @@ name = "qcoin-types"
 version = "0.1.1"
 dependencies = [
  "blake3",
- "qcoin-crypto",
+ "loadngo-pq-crypto",
  "serde",
  "thiserror",
 ]
