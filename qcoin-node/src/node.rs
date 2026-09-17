@@ -644,22 +644,39 @@ where
                 if !self.ensure_compatible_peer(source)? {
                     return Ok(());
                 }
+                let incoming_height = block.header.height;
+                let mut inferred_remote_tip = None;
                 let response = match self.apply_remote_block(block) {
                     Ok(height) => SubmitBlockResponse {
                         accepted: true,
                         height,
                         message: "block accepted".to_string(),
                     },
-                    Err(err) => SubmitBlockResponse {
-                        accepted: false,
-                        height: self.current_height()?,
-                        message: err,
-                    },
+                    Err(err) => {
+                        let height = self.current_height()?;
+                        if incoming_height > height {
+                            inferred_remote_tip = Some(incoming_height);
+                        }
+                        SubmitBlockResponse {
+                            accepted: false,
+                            height,
+                            message: err,
+                        }
+                    }
                 };
                 self.send_wire(
                     source,
                     crate::wire::WireMessage::SubmitBlockResponse(response),
-                )
+                )?;
+                if let Some(remote_tip_height) = inferred_remote_tip {
+                    self.record_inferred_peer_tip(source, remote_tip_height);
+                    if let Err(err) = self.request_next_missing_block(source, remote_tip_height) {
+                        eprintln!(
+                            "Failed to request missing block from {source} after future block: {err}"
+                        );
+                    }
+                }
+                Ok(())
             }
             crate::wire::WireMessage::SubmitBlockResponse(response) => {
                 if !response.accepted {
@@ -750,6 +767,15 @@ where
                 .unwrap_or(0)
         };
         self.request_next_missing_block(source, remote_tip)
+    }
+
+    fn record_inferred_peer_tip(&self, source: SocketAddr, remote_tip_height: u64) {
+        let mut sync_state = self.sync_state.lock().expect("sync state poisoned");
+        sync_state
+            .peer_tip_heights
+            .entry(source)
+            .and_modify(|height| *height = (*height).max(remote_tip_height))
+            .or_insert(remote_tip_height);
     }
 
     fn request_next_missing_block(
@@ -971,6 +997,7 @@ where
                 )?;
             }
         }
+        self.send_wire(source, crate::wire::WireMessage::TipRequest)?;
         Ok(())
     }
 
@@ -1249,7 +1276,7 @@ mod tests {
     use super::{discovery_targets_for, resolve_peer_addrs, CoreConfig, NodeService};
     use crate::{
         blocks_path_from_state_path, default_chain_state, load_block_history, load_chain_state,
-        write_file_atomically, NodeRuntime,
+        produce_one_block, write_file_atomically, NodeRuntime,
     };
     use loadngo_proactor::{ChannelPort, Proactor};
     use network::MulticastConfig;
@@ -1273,6 +1300,20 @@ mod tests {
             assert!(
                 Instant::now() < deadline,
                 "timed out waiting for handshake with {label}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_height(runtime: &Arc<Mutex<NodeRuntime>>, height: u64, label: &str) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if runtime.lock().unwrap().chain.height == height {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {label} to reach height {height}"
             );
             thread::sleep(Duration::from_millis(10));
         }
@@ -1409,6 +1450,109 @@ mod tests {
         worker_b.join().unwrap();
 
         assert_eq!(runtime_b.lock().unwrap().chain.height, 1);
+    }
+
+    #[test]
+    fn qcoin_node_service_backfills_after_future_block_rejection() {
+        let signer = shared_signer().unwrap();
+        let validator_public = signer.public_key.clone();
+
+        let dir_a = tempdir().unwrap();
+        let dir_b = tempdir().unwrap();
+
+        let runtime_a = Arc::new(Mutex::new(
+            producing_runtime(dir_a.path(), signer, vec![validator_public.clone()], true).unwrap(),
+        ));
+        let runtime_b = Arc::new(Mutex::new(
+            validating_runtime(dir_b.path(), vec![validator_public]).unwrap(),
+        ));
+
+        let network_a = Arc::new(
+            super::build_network(
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)),
+                &[],
+            )
+            .unwrap(),
+        );
+        let addr_a = network_a.local_addr().unwrap();
+
+        let network_b = Arc::new(
+            super::build_network(
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)),
+                &[addr_a],
+            )
+            .unwrap(),
+        );
+        let addr_b = network_b.local_addr().unwrap();
+
+        let proactor_a = Proactor::new(ChannelPort::new());
+        let handle_a = proactor_a.handle();
+        let worker_a = thread::spawn(move || proactor_a.run_until_stopped().unwrap());
+
+        let service_a = NodeService::start_polling(
+            Arc::clone(&runtime_a),
+            Arc::clone(&network_a),
+            CoreConfig {
+                bind_addr: addr_a,
+                peers: vec![addr_b],
+                multicast: Vec::new(),
+                sync_interval: Duration::from_secs(30),
+                produce_interval: Duration::from_secs(30),
+                produce: false,
+                reliable_node_public_key_hex: Vec::new(),
+            },
+            handle_a.clone(),
+            Duration::from_millis(2),
+        )
+        .unwrap();
+
+        let proactor_b = Proactor::new(ChannelPort::new());
+        let handle_b = proactor_b.handle();
+        let worker_b = thread::spawn(move || proactor_b.run_until_stopped().unwrap());
+
+        let service_b = NodeService::start_polling(
+            Arc::clone(&runtime_b),
+            Arc::clone(&network_b),
+            CoreConfig {
+                bind_addr: addr_b,
+                peers: vec![addr_a],
+                multicast: Vec::new(),
+                sync_interval: Duration::from_secs(30),
+                produce_interval: Duration::from_secs(30),
+                produce: false,
+                reliable_node_public_key_hex: Vec::new(),
+            },
+            handle_b.clone(),
+            Duration::from_millis(2),
+        )
+        .unwrap();
+
+        wait_for_handshake(&service_a, addr_b, "node B");
+        wait_for_handshake(&service_b, addr_a, "node A");
+
+        let (_height_1, _block_1) = produce_one_block(&runtime_a)
+            .unwrap()
+            .expect("producer should create the first empty block");
+        thread::sleep(Duration::from_secs(1));
+        let (_height_2, block_2) = produce_one_block(&runtime_a)
+            .unwrap()
+            .expect("producer should create the second empty block");
+
+        let future_block_frame =
+            crate::wire::encode(&crate::wire::WireMessage::SubmitBlock { block: block_2 }).unwrap();
+        service_b
+            .inner
+            .handle_frame(addr_a, &future_block_frame)
+            .unwrap();
+
+        wait_for_height(&runtime_b, 2, "node B");
+
+        handle_a.stop().unwrap();
+        handle_b.stop().unwrap();
+        worker_a.join().unwrap();
+        worker_b.join().unwrap();
+
+        assert_eq!(runtime_b.lock().unwrap().chain.height, 2);
     }
 
     #[test]

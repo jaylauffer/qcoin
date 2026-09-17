@@ -60,6 +60,17 @@ The other active validators remain at:
 
 ## Most Likely Code/Protocol Problems
 
+Update 2026-04-27:
+
+- `qcoin-node/src/node.rs` now sends a `TipRequest` immediately after accepted
+  `NodeInfo`.
+- `SubmitBlock` rejection for a future height now records the sender as an
+  inferred higher tip and requests the next missing block.
+- `qcoin_node_service_backfills_after_future_block_rejection` covers the
+  stale-peer path where a node misses block `N` and then receives block `N+1`.
+- Endpoint advertisement and peer identity decoupling remain open follow-up
+  work.
+
 ### 1. Node identity is bound too tightly to socket address
 
 Relevant files:
@@ -100,7 +111,7 @@ Relevant files:
 - `qcoin-node/src/node.rs`
 - `qcoin-consensus/src/lib.rs`
 
-Current behavior:
+Former behavior:
 
 - block broadcasts arrive as `SubmitBlock`
 - stale node calls `apply_remote_block(block)`
@@ -115,22 +126,32 @@ That means:
 - broadcast block propagation does not recover stale nodes
 - recovery depends entirely on the separate tip-sync / block-request path
 
+Current behavior:
+
+- if the rejected block is ahead of local height, the receiver treats that
+  height as an inferred remote tip
+- the receiver immediately requests the next missing block from that peer
+- normal `BlockResponse` follow-up then walks forward until the inferred tip
+
 ### 3. Recovery depends on periodic tip sync rather than immediate sync trigger
 
 Relevant file:
 
 - `qcoin-node/src/node.rs`
 
-After `handle_node_info`, the peer is accepted, but there is no immediate
-`TipRequest`.
+Former behavior:
 
-Instead, the node waits for the periodic sync loop:
+- after `handle_node_info`, the peer was accepted, but there was no immediate
+  `TipRequest`
+- the node waited for the periodic sync loop:
+  - `schedule_sync`
+  - `broadcast_tip_requests`
 
-- `schedule_sync`
-- `broadcast_tip_requests`
+Current behavior:
 
-This is not necessarily the root bug, but it makes rejoin behavior slower and
-more brittle than it needs to be.
+- after accepted `NodeInfo`, the receiver sends `TipRequest` immediately
+- the periodic sync loop remains a safety net instead of the first recovery
+  trigger
 
 ## Likely Failure Story
 
@@ -177,6 +198,8 @@ This can start as a minimal map rather than a full peer-management redesign.
 
 ### C. On stale-block rejection, trigger block backfill
 
+Status: implemented in `qcoin-node/src/node.rs`.
+
 When `SubmitBlock` is rejected because the block is ahead of the local height
 or has a mismatched parent due to missing history:
 
@@ -189,6 +212,8 @@ from the periodic tip poll.
 
 ### D. Trigger immediate tip sync after successful `NodeInfo`
 
+Status: implemented in `qcoin-node/src/node.rs`.
+
 When `handle_node_info` accepts a peer:
 
 - send `TipRequest` immediately
@@ -197,6 +222,8 @@ When `handle_node_info` accepts a peer:
 That reduces rejoin latency and makes recovery more deterministic.
 
 ### E. Add a regression test for stale-node rejoin
+
+Status: partially implemented in `qcoin-node/src/node.rs`.
 
 This test is the real target.
 
@@ -208,7 +235,10 @@ Needed scenario:
 4. prove node C catches up from `height 16` to `17`
 5. prove the cluster can then produce `18`
 
-Without this test, the bug is likely to recur in a slightly different form.
+The current regression covers the core catch-up primitive with two nodes: node
+B misses block `1`, receives block `2`, rejects it, and then backfills to
+height `2`. A full 3-node validator restart test is still useful before
+calling the lab cluster exit gate complete.
 
 ## Exact Files To Inspect
 
@@ -237,12 +267,14 @@ Most likely causes:
 
 - peer identity is too tied to observed socket address
 - endpoint advertisement is missing from `NodeInfo`
-- stale block rejection does not trigger missing-block recovery
+- stale block rejection previously did not trigger missing-block recovery
 
 Primary target:
 
-- make a stale validator rejoin from `16 -> 17` reliably, then prove the
-  cluster can advance to `18`
-- rejoin sync is too dependent on periodic polling
+- make a stale validator rejoin from `16 -> 17` reliably in the live lab, then
+  prove the cluster can advance to `18`
+- keep endpoint advertisement and identity decoupling as the next hardening
+  step
 
-Fix the stale-node rejoin path first.
+The local code path for stale-node rejoin has been fixed; live lab validation
+still needs to prove it on the affected machine.
