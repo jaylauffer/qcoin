@@ -3,6 +3,7 @@
 debug
 target
 data/
+build/
 qcoin-chain-state.json
 *.blocks.json
 
