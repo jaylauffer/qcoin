@@ -56,7 +56,13 @@ tag or the exact commit it points to.
 
 For sustained lab operation, services should point at:
 
-- `target/release/qcoin-node`
+- a release binary built as `target/release/qcoin-node`, then installed outside
+  the disposable build directory (the current lab uses
+  `/home/jay/.local/bin/qcoin-node`)
+
+Record the installed binary's SHA-256 and the sibling Loadngo source revision
+alongside the QCoin revision: this node has local path dependencies. A QCoin
+revision alone does not identify the executable.
 
 `target/debug/qcoin-node` is acceptable only for short-lived stabilization or
 thermal-constrained emergency work. It should not be the steady-state service

@@ -18,6 +18,10 @@ Follow-up: https://chatgpt.com/share/69248807-3d10-800e-a3d9-22ad6e7aa8a5
 
 ## Build and run
 
+For the existing lab nodes, start with [Lab operations](docs/LAB_OPERATIONS.md).
+It records the September 2026 Agnes/Dolores recovery; the older three-node
+walkthrough and April exit-gate results are historical.
+
 ```bash
 cargo build
 cargo run -p qcoin-node -- run
@@ -39,7 +43,7 @@ Current code does not yet implement native QCOIN issuance. Generic assets can be
 For the current proof-of-concept direction, qcoin should sit behind `entitlement-achievement-blockchain` as an auditable proof layer. The qcoin-side anchoring contract for EAB is recorded in [docs/EAB_ANCHOR_TRANSACTION_MODEL.md](docs/EAB_ANCHOR_TRANSACTION_MODEL.md).
 The current "what has actually been proven on the lab cluster" note is
 recorded in [docs/LAB_CLUSTER_WORKING_PROOF.md](docs/LAB_CLUSTER_WORKING_PROOF.md).
-The operational handoff point from qcoin bring-up to EAB-first work is recorded in [docs/QCOIN_EXIT_GATE.md](docs/QCOIN_EXIT_GATE.md). The current three-node lab passed that gate on `2026-04-16`; treat qcoin as active infrastructure work rather than the main blocker unless the gate needs to be re-opened.
+The operational handoff point from qcoin bring-up to EAB-first work is recorded in [docs/QCOIN_EXIT_GATE.md](docs/QCOIN_EXIT_GATE.md). The then-current three-node lab passed that gate on `2026-04-16`; this historical result does not establish the health of today's deployment. See [Lab operations](docs/LAB_OPERATIONS.md) for the current topology and verification limits.
 
 Rollout discipline for `dev` -> lab deployment -> `main` promotion is recorded
 in [ROLLOUT_POLICY.md](docs/ROLLOUT_POLICY.md).
