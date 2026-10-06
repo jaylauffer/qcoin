@@ -82,30 +82,6 @@ struct InputWitness {
     unlock: Vec<Vec<u8>>,
 }
 
-/// The witness before unlocking data existed, still found in older lab chains.
-#[derive(Deserialize)]
-struct LegacyInputWitness {
-    script: Script,
-    metadata: Option<Vec<u8>>,
-}
-
-impl InputWitness {
-    /// A legacy witness always ends where `unlock` would begin, so it never
-    /// decodes in the current form; it decodes with no unlocking data.
-    fn decode(bytes: &[u8]) -> Result<Self, LedgerError> {
-        if let Ok(witness) = bincode::deserialize::<InputWitness>(bytes) {
-            return Ok(witness);
-        }
-        let legacy: LegacyInputWitness =
-            bincode::deserialize(bytes).map_err(|_| LedgerError::InvalidWitness)?;
-        Ok(InputWitness {
-            script: legacy.script,
-            metadata: legacy.metadata,
-            unlock: Vec::new(),
-        })
-    }
-}
-
 fn hash_bytes(data: &[u8]) -> Hash256 {
     *blake3::hash(data).as_bytes()
 }
@@ -233,7 +209,8 @@ impl LedgerState {
                 .get(input_index)
                 .ok_or(LedgerError::MissingWitness)?;
 
-            let witness = InputWitness::decode(witness_bytes)?;
+            let witness: InputWitness =
+                bincode::deserialize(witness_bytes).map_err(|_| LedgerError::InvalidWitness)?;
 
             let script_bytes = script_codec::encode_script(&witness.script);
             let script_hash = hash_bytes(&script_bytes);
@@ -1159,32 +1136,5 @@ mod tests {
             Err(LedgerError::ScriptHashMismatch)
         ));
         assert!(ledger.utxos.contains_key(&key));
-    }
-
-    #[test]
-    fn legacy_witness_without_unlocking_data_still_decodes() {
-        // The witness of the one spend on agnes's April chain (~/.qcoin):
-        // `[Nop]`, no metadata, written before unlocking data existed.
-        let legacy = hex_bytes("01000000000000000600000000");
-        let witness = InputWitness::decode(&legacy).expect("legacy witness should decode");
-        assert_eq!(witness.script, simple_script());
-        assert!(witness.metadata.is_none());
-        assert!(witness.unlock.is_empty());
-
-        let current = build_unlocking_witness(&simple_script(), vec![vec![7u8; 3]]);
-        let witness = InputWitness::decode(&current).expect("current witness should decode");
-        assert_eq!(witness.unlock, vec![vec![7u8; 3]]);
-
-        assert!(matches!(
-            InputWitness::decode(&[0xff; 4]),
-            Err(LedgerError::InvalidWitness)
-        ));
-    }
-
-    fn hex_bytes(hex: &str) -> Vec<u8> {
-        (0..hex.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex digit"))
-            .collect()
     }
 }

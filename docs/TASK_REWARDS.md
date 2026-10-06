@@ -67,13 +67,12 @@ How it works now:
 - The standard single-key payee script is `[PushBytes(public key), CheckSig]`, with
   the signature as its only unlocking item. Its hash is known before anything is
   signed.
-- A witness written before `unlock` existed still decodes, with no unlocking data.
-  The only such spend found is a `Nop` spend on agnes's April chain in `~/.qcoin`.
-  The live `chain1` data on agnes and dolores has no spends.
+- A witness written before `unlock` existed no longer decodes. Jay: no chain with
+  such witnesses is live (the only one found is a `Nop` spend on agnes's April chain
+  in `~/.qcoin`; the `chain1` data on agnes and dolores has no spends).
 
 Tests: `key_locked_output_is_spent_with_signature_as_unlocking_data`,
-`key_locked_output_rejects_missing_or_foreign_signatures` and
-`legacy_witness_without_unlocking_data_still_decodes` in `qcoin-ledger`;
+and `key_locked_output_rejects_missing_or_foreign_signatures` in `qcoin-ledger`;
 `checks_two_of_two_multisig_with_signatures_as_unlocking_data` and
 `bounds_unlock_data_like_pushes` in `qcoin-script`.
 
