@@ -136,11 +136,15 @@ never the reverse. A task node still takes only `--reward-payee`.
 
 ## Open
 
-- **One payee per operator or per task node.** Per node separates the accounts of
-  several nodes and keeps one leaked node identity from linking all of an operator's
-  earnings; per operator is simpler to set up.
 - **The asset for stage 2.** A submitter-issued task credit now, or wait for native
   QCOIN.
-- **Payee form.** This document uses the owner script hash, which also covers later
-  multi-key scripts. The alternative is the public key, with the settler deriving the
-  hash; simpler for operators, but it ties payees to the single-key script.
+
+## Decided (Jay, 2026-10-06)
+
+- **Payee form: the owner script hash.** Not the public key with the settler
+  deriving the hash: a script hash also covers multi-key (`CheckMultiSig` is a real
+  m-of-n since qcoin `4320770`) and other scripts without changing the flag.
+- **One payee per task node.** `qcoin-node payee`, the docs and examples give each
+  task node its own key and payee. That keeps one leaked node identity from linking
+  all of an operator's earnings. Nothing enforces it: an operator who wants one
+  balance can pass the same payee to several nodes.
