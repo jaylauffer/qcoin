@@ -1,0 +1,69 @@
+# qcoin gates: fmt, strict clippy and the workspace tests, on Linux (x86-64 and
+# arm64, the arm64 leg standing in for the lab Pis), macOS and Windows.
+#
+# GitHub-hosted runners: qcoin and loadngo are public repositories, so these
+# minutes are free, and qcoin needs no runner registered on lab hardware.
+#
+# qcoin depends on loadngo by path (`../loadngo/pq-crypto`, `proactor`,
+# `network`), so loadngo is checked out beside it. It is pinned, not `dev`:
+# Cargo.lock records loadngo's dependencies, and with `--locked` a new
+# dependency on loadngo `dev` fails the build until qcoin's lock is refreshed.
+# When Cargo.lock is refreshed for a newer loadngo, move LOADNGO_REV to that
+# loadngo commit in the same qcoin commit.
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  LOADNGO_REV: a834b333d74cd7c180bca65a303900dd6aa1acdb
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      # One platform failing must not hide what the others report.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: qcoin
+
+      - uses: actions/checkout@v4
+        with:
+          repository: jaylauffer/loadngo
+          ref: ${{ env.LOADNGO_REV }}
+          path: loadngo
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustc --version
+
+      - name: cargo fmt --check
+        working-directory: qcoin
+        run: cargo fmt --all --check
+
+      - name: cargo clippy (warnings are errors)
+        working-directory: qcoin
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: cargo test
+        working-directory: qcoin
+        run: cargo test --workspace --locked
