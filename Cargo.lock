@@ -423,6 +423,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "loadngo-persistence"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "windows",
+]
+
+[[package]]
 name = "loadngo-pq-crypto"
 version = "0.1.0"
 dependencies = [
@@ -617,6 +625,7 @@ dependencies = [
  "bincode",
  "clap",
  "ctrlc",
+ "loadngo-persistence",
  "loadngo-pq-crypto",
  "loadngo-proactor",
  "network",

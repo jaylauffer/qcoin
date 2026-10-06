@@ -10,9 +10,8 @@ use qcoin_types::{AssetDefinition, AssetId, Block, Hash256, Transaction};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    ffi::OsString,
     fs::{self, File},
-    io::{Read, Write},
+    io::Read,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
     sync::{atomic::AtomicBool, Arc, Mutex},
@@ -1568,50 +1567,11 @@ fn save_block_history(path: &Path, blocks: &[Block]) -> Result<(), String> {
     write_file_atomically(path, encoded.as_bytes())
 }
 
+/// Replaces `path` so a crash leaves either the old file or all of the new one
+/// (loadngo-persistence: synced temp file, then a durable rename).
 fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-    }
-
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| format!("path '{}' has no file name", path.display()))?;
-    let mut temp_name = OsString::from(file_name);
-    temp_name.push(".tmp");
-    let temp_path = path.with_file_name(temp_name);
-
-    {
-        let mut file = File::create(&temp_path).map_err(|err| err.to_string())?;
-        file.write_all(contents).map_err(|err| err.to_string())?;
-        file.sync_all().map_err(|err| err.to_string())?;
-    }
-
-    fs::rename(&temp_path, path).map_err(|err| err.to_string())?;
-    sync_parent_dir(path)
-}
-
-#[cfg(unix)]
-fn sync_parent_dir(path: &Path) -> Result<(), String> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
-    let dir = File::open(parent).map_err(|err| {
-        format!(
-            "failed to open parent directory {}: {err}",
-            parent.display()
-        )
-    })?;
-    dir.sync_all().map_err(|err| {
-        format!(
-            "failed to sync parent directory {}: {err}",
-            parent.display()
-        )
-    })
-}
-
-#[cfg(not(unix))]
-fn sync_parent_dir(_path: &Path) -> Result<(), String> {
-    Ok(())
+    loadngo_persistence::replace_atomically(path, contents)
+        .map_err(|err| format!("failed to write {}: {err}", path.display()))
 }
 
 fn generate_keypair(scheme: SchemeArg) {
@@ -1738,6 +1698,18 @@ mod tests {
         } else {
             assert!(configs.is_err());
         }
+    }
+
+    /// Chain state is rewritten in place every block. On Windows this is the
+    /// write-through MoveFileExW replace, which qcoin CI runs on Windows.
+    #[test]
+    fn write_file_atomically_replaces_an_existing_file() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        write_file_atomically(&state_path, b"{\"height\":1}").unwrap();
+        write_file_atomically(&state_path, b"{\"height\":2}").unwrap();
+        assert_eq!(std::fs::read(&state_path).unwrap(), b"{\"height\":2}");
+        assert!(!dir.path().join("state.json.tmp").exists());
     }
 
     #[test]
