@@ -13,11 +13,14 @@ use std::{
     ffi::OsString,
     fs::{self, File},
     io::{Read, Write},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
     sync::{atomic::AtomicBool, Arc, Mutex},
     time::Duration,
 };
+
+#[cfg(unix)]
+use std::net::IpAddr;
 
 const DEFAULT_CHAIN_ID: u32 = 0;
 const DEFAULT_IPV6_MULTICAST_GROUP: Ipv6Addr =
@@ -1846,7 +1849,9 @@ mod tests {
     use qcoin_script::DeterministicScriptEngine;
     use qcoin_types::{AssetAmount, AssetDefinition, AssetId, AssetKind, Output};
     use std::collections::HashMap;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::net::Ipv6Addr;
+    #[cfg(unix)]
+    use std::net::{IpAddr, Ipv4Addr};
     use tempfile::tempdir;
 
     #[test]
