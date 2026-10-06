@@ -1,4 +1,5 @@
 mod node;
+mod task_reward;
 mod wire;
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
@@ -98,6 +99,47 @@ enum Commands {
     Keygen {
         #[arg(long, value_enum, default_value_t = SchemeArg::Dilithium2)]
         scheme: SchemeArg,
+    },
+    /// Print the payee for a key: the owner script hash of the standard single-key
+    /// script, which that key's signature spends. Give it to a loadngo task node as
+    /// `--reward-payee qcoin=<hash>`. Use one key per task node.
+    Payee {
+        /// A keypair JSON from `keygen` (only its public half is read)
+        #[arg(long, conflicts_with = "public_key_hex")]
+        keypair_json: Option<PathBuf>,
+        /// The public key, hex
+        #[arg(long)]
+        public_key_hex: Option<String>,
+        /// The public key's scheme, with --public-key-hex
+        #[arg(long, value_enum, default_value_t = SchemeArg::Dilithium2)]
+        scheme: SchemeArg,
+    },
+    /// QCoin as a loadngo Task reward scheme (loadngo docs/TASK_REWARD_FLOW.md)
+    TaskReward {
+        #[command(subcommand)]
+        action: TaskRewardAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum TaskRewardAction {
+    /// Settler for `task_submitter --reward qcoin=...`: reads a settle request as JSON
+    /// on stdin, submits the reward to the node at --target, waits up to the request's
+    /// wait_seconds for a block, and writes the settlement (settled, pending or
+    /// failed) as JSON on stdout.
+    Settle {
+        #[arg(long)]
+        target: String,
+    },
+    /// Verifier for `task-node --reward-verify qcoin=...`: reads a settlement as JSON on
+    /// stdin, writes it as it now stands, and exits 0 only if its transaction is in a
+    /// block (and, with --payee, pays that owner script hash).
+    Verify {
+        #[arg(long)]
+        target: String,
+        /// This worker's payee; without it, any transaction with the id counts
+        #[arg(long)]
+        payee: Option<String>,
     },
 }
 
@@ -297,6 +339,120 @@ fn main() {
             timeout_seconds,
         } => query_block_via_udp(target, height, timeout_seconds),
         Commands::Keygen { scheme } => generate_keypair(scheme),
+        Commands::Payee {
+            keypair_json,
+            public_key_hex,
+            scheme,
+        } => match payee_for(keypair_json.as_deref(), public_key_hex.as_deref(), scheme) {
+            Ok(payee) => println!("{payee}"),
+            Err(err) => {
+                eprintln!("{err}");
+                std::process::exit(2);
+            }
+        },
+        Commands::TaskReward { action } => std::process::exit(run_task_reward(action)),
+    }
+}
+
+#[derive(Deserialize)]
+struct PublicKeyFile {
+    scheme: String,
+    public_key_hex: String,
+}
+
+fn parse_scheme_name(name: &str) -> Result<SignatureSchemeId, String> {
+    match name.to_ascii_lowercase().as_str() {
+        "dilithium2" => Ok(SignatureSchemeId::Dilithium2),
+        "falcon512" => Ok(SignatureSchemeId::Falcon512),
+        _ => Err(format!("unsupported scheme '{name}'")),
+    }
+}
+
+/// The owner script hash, hex, of the standard single-key script for a public key.
+fn payee_for(
+    keypair_json: Option<&Path>,
+    public_key_hex: Option<&str>,
+    scheme: SchemeArg,
+) -> Result<String, String> {
+    let public_key = match (keypair_json, public_key_hex) {
+        (Some(path), _) => {
+            let text = fs::read_to_string(path)
+                .map_err(|err| format!("reading {}: {err}", path.display()))?;
+            let file: PublicKeyFile = serde_json::from_str(&text)
+                .map_err(|err| format!("parsing {}: {err}", path.display()))?;
+            PublicKey::new(
+                parse_scheme_name(&file.scheme)?,
+                from_hex(&file.public_key_hex)?,
+            )
+        }
+        (None, Some(hex)) => PublicKey::new(scheme.into(), from_hex(hex)?),
+        (None, None) => return Err("give --keypair-json or --public-key-hex".to_string()),
+    }
+    .map_err(|err| format!("invalid public key: {err}"))?;
+    let script = qcoin_ledger::single_key_script(&public_key)
+        .map_err(|err| format!("invalid public key: {err}"))?;
+    Ok(to_hex(&qcoin_ledger::owner_script_hash(&script)))
+}
+
+/// Runs a task-reward command; returns the process exit code.
+fn run_task_reward(action: TaskRewardAction) -> i32 {
+    let mut input = Vec::new();
+    if let Err(err) = std::io::stdin().read_to_end(&mut input) {
+        eprintln!("reading stdin: {err}");
+        return 2;
+    }
+    match action {
+        TaskRewardAction::Settle { target } => {
+            let request: network::task_reward::SettleRequest = match serde_json::from_slice(&input)
+            {
+                Ok(request) => request,
+                Err(err) => {
+                    eprintln!("stdin is not a settle request: {err}");
+                    return 2;
+                }
+            };
+            let chain = task_reward::NodeChain { target };
+            let outcome = task_reward::settle(&chain, &request, task_reward::CHECK_INTERVAL);
+            match print_json(&outcome) {
+                Ok(()) => 0,
+                Err(err) => {
+                    eprintln!("{err}");
+                    2
+                }
+            }
+        }
+        TaskRewardAction::Verify { target, payee } => {
+            let given: network::task_reward::RewardSettlement = match serde_json::from_slice(&input)
+            {
+                Ok(given) => given,
+                Err(err) => {
+                    eprintln!("stdin is not a settlement: {err}");
+                    return 2;
+                }
+            };
+            let payee = match payee
+                .as_deref()
+                .map(|hex| task_reward::parse_hash_hex("--payee", hex))
+                .transpose()
+            {
+                Ok(payee) => payee,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return 2;
+                }
+            };
+            let chain = task_reward::NodeChain { target };
+            let (real, now) = task_reward::verify(&chain, &given, payee.as_ref());
+            if let Err(err) = print_json(&now) {
+                eprintln!("{err}");
+                return 2;
+            }
+            if real {
+                0
+            } else {
+                1
+            }
+        }
     }
 }
 
@@ -513,83 +669,40 @@ fn run_node(
 }
 
 fn submit_transaction_via_udp(tx_json: PathBuf, target: String, timeout_seconds: u64) {
-    let transaction = match load_transaction_json(&tx_json) {
-        Ok(transaction) => transaction,
-        Err(err) => {
-            eprintln!("{err}");
-            return;
-        }
-    };
-    let target_addr = match node::resolve_endpoint_addr(&target) {
-        Ok(addr) => addr,
-        Err(err) => {
-            eprintln!("{err}");
-            return;
-        }
-    };
-    let bind_addr: SocketAddr = match target_addr {
-        SocketAddr::V4(_) => "0.0.0.0:0".parse().expect("valid IPv4 wildcard bind"),
-        SocketAddr::V6(_) => "[::]:0".parse().expect("valid IPv6 wildcard bind"),
-    };
-    let socket = match UdpSocket::bind(bind_addr) {
-        Ok(socket) => socket,
-        Err(err) => {
-            eprintln!("Failed to bind UDP submit socket on {bind_addr}: {err}");
-            return;
-        }
-    };
-    if let Err(err) = socket.set_read_timeout(Some(Duration::from_secs(timeout_seconds.max(1)))) {
-        eprintln!("Failed to set UDP submit timeout: {err}");
-        return;
+    let result = load_transaction_json(&tx_json)
+        .and_then(|transaction| submit_transaction(&target, &transaction, timeout_seconds));
+    match result {
+        Ok(response) => match serde_json::to_string_pretty(&response) {
+            Ok(json) => println!("{json}"),
+            Err(_) => println!(
+                "{{\"accepted\":{},\"tx_id_hex\":\"{}\",\"message\":\"{}\"}}",
+                response.accepted, response.tx_id_hex, response.message
+            ),
+        },
+        Err(err) => eprintln!("{err}"),
     }
+}
 
-    let frame = match wire::encode(&wire::WireMessage::SubmitTransaction {
-        transaction: transaction.clone(),
-    }) {
-        Ok(frame) => frame,
-        Err(err) => {
-            eprintln!("Failed to encode transaction submission: {err}");
-            return;
-        }
-    };
-    if let Err(err) = socket.send_to(&frame, target_addr) {
-        eprintln!("Failed to submit transaction to {target_addr}: {err}");
-        return;
-    }
-
-    let mut buf = [0u8; 64 * 1024];
+/// Submits `transaction` to the node at `target` and returns its answer.
+fn submit_transaction(
+    target: &str,
+    transaction: &Transaction,
+    timeout_seconds: u64,
+) -> Result<SubmitTransactionResponse, String> {
+    let target_addr = node::resolve_endpoint_addr(target)?;
+    let socket = bind_query_socket(target_addr, timeout_seconds)?;
+    send_udp_message(
+        &socket,
+        target_addr,
+        wire::WireMessage::SubmitTransaction {
+            transaction: transaction.clone(),
+        },
+    )?;
     loop {
-        let (len, source) = match socket.recv_from(&mut buf) {
-            Ok(result) => result,
-            Err(err) => {
-                eprintln!("Timed out waiting for transaction response from {target_addr}: {err}");
-                return;
-            }
-        };
-        if source != target_addr {
-            continue;
-        }
-        let message = match wire::decode(&buf[..len]) {
-            Ok(message) => message,
-            Err(err) => {
-                eprintln!("Discarding invalid UDP response from {source}: {err}");
-                continue;
-            }
-        };
-        match message {
-            wire::WireMessage::SubmitTransactionResponse(response) => {
-                match serde_json::to_string_pretty(&response) {
-                    Ok(json) => println!("{json}"),
-                    Err(_) => println!(
-                        "{{\"accepted\":{},\"tx_id_hex\":\"{}\",\"message\":\"{}\"}}",
-                        response.accepted, response.tx_id_hex, response.message
-                    ),
-                }
-                return;
-            }
-            wire::WireMessage::PresenceAnnounce => continue,
-            wire::WireMessage::NodeInfo(_) => continue,
-            _ => continue,
+        if let wire::WireMessage::SubmitTransactionResponse(response) =
+            receive_wire_message(&socket, target_addr)?
+        {
+            return Ok(response);
         }
     }
 }
@@ -627,88 +740,47 @@ fn query_node_info_via_udp(target: String, timeout_seconds: u64) {
 }
 
 fn query_tip_via_udp(target: String, timeout_seconds: u64) {
-    let target_addr = match node::resolve_endpoint_addr(&target) {
-        Ok(addr) => addr,
-        Err(err) => {
-            eprintln!("{err}");
-            return;
-        }
-    };
-    let socket = match bind_query_socket(target_addr, timeout_seconds) {
-        Ok(socket) => socket,
-        Err(err) => {
-            eprintln!("{err}");
-            return;
-        }
-    };
-    let remote_node_info = match receive_remote_node_info(&socket, target_addr) {
-        Ok(node_info) => node_info,
-        Err(err) => {
-            eprintln!("{err}");
-            return;
-        }
-    };
-    if let Err(err) = send_probe_node_info(&socket, target_addr, remote_node_info.chain_id) {
+    if let Err(err) = fetch_tip(&target, timeout_seconds).and_then(|tip| print_json(&tip)) {
         eprintln!("{err}");
-        return;
-    }
-    if let Err(err) = send_udp_message(&socket, target_addr, wire::WireMessage::TipRequest) {
-        eprintln!("{err}");
-        return;
-    }
-    match wait_for_tip_response(&socket, target_addr) {
-        Ok(tip) => {
-            if let Err(err) = print_json(&tip) {
-                eprintln!("{err}");
-            }
-        }
-        Err(err) => eprintln!("{err}"),
     }
 }
 
 fn query_block_via_udp(target: String, height: u64, timeout_seconds: u64) {
-    let target_addr = match node::resolve_endpoint_addr(&target) {
-        Ok(addr) => addr,
-        Err(err) => {
-            eprintln!("{err}");
-            return;
-        }
-    };
-    let socket = match bind_query_socket(target_addr, timeout_seconds) {
-        Ok(socket) => socket,
-        Err(err) => {
-            eprintln!("{err}");
-            return;
-        }
-    };
-    let remote_node_info = match receive_remote_node_info(&socket, target_addr) {
-        Ok(node_info) => node_info,
-        Err(err) => {
-            eprintln!("{err}");
-            return;
-        }
-    };
-    if let Err(err) = send_probe_node_info(&socket, target_addr, remote_node_info.chain_id) {
-        eprintln!("{err}");
-        return;
-    }
-    if let Err(err) = send_udp_message(
-        &socket,
-        target_addr,
-        wire::WireMessage::BlockRequest { height },
-    ) {
-        eprintln!("{err}");
-        return;
-    }
-    match wait_for_block_response(&socket, target_addr, height) {
+    match fetch_block(&target, height, timeout_seconds) {
         Ok(Some(block)) => {
             if let Err(err) = print_json(&block) {
                 eprintln!("{err}");
             }
         }
-        Ok(None) => eprintln!("Peer {target_addr} does not have block at height {height}"),
+        Ok(None) => eprintln!("Peer {target} does not have block at height {height}"),
         Err(err) => eprintln!("{err}"),
     }
+}
+
+/// Opens a query session with the node at `target`: learns its chain id and
+/// introduces this socket as a probe, as the node expects before answering queries.
+fn open_query(target: &str, timeout_seconds: u64) -> Result<(UdpSocket, SocketAddr), String> {
+    let target_addr = node::resolve_endpoint_addr(target)?;
+    let socket = bind_query_socket(target_addr, timeout_seconds)?;
+    let remote_node_info = receive_remote_node_info(&socket, target_addr)?;
+    send_probe_node_info(&socket, target_addr, remote_node_info.chain_id)?;
+    Ok((socket, target_addr))
+}
+
+fn fetch_tip(target: &str, timeout_seconds: u64) -> Result<TipResponse, String> {
+    let (socket, target_addr) = open_query(target, timeout_seconds)?;
+    send_udp_message(&socket, target_addr, wire::WireMessage::TipRequest)?;
+    wait_for_tip_response(&socket, target_addr)
+}
+
+fn fetch_block(target: &str, height: u64, timeout_seconds: u64) -> Result<Option<Block>, String> {
+    let (socket, target_addr) = open_query(target, timeout_seconds)?;
+    send_udp_message(
+        &socket,
+        target_addr,
+        wire::WireMessage::BlockRequest { height },
+    )?;
+    wait_for_block_response(&socket, target_addr, height)
 }
 
 fn sync_all_peers_udp(

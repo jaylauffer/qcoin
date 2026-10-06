@@ -6,8 +6,9 @@ and the stages from launch-time configuration to a wallet.
 The Task side is in loadngo `docs/TASK_REWARD_FLOW.md`: accepting the work never
 depends on the reward, each operator chooses the reward schemes it takes part in, and
 QCoin is the first-party settler, run as an external command. This document is the
-QCoin side of that plan. Written 2026-10-06. Only the ledger fix for spending
-key-locked outputs is built; the rest is not.
+QCoin side of that plan. Written 2026-10-06. Stage 1 is built (2026-10-06):
+spending key-locked outputs, `qcoin-node payee`, and `qcoin-node task-reward settle`
+and `verify`. Stages 2 and 3 are not.
 
 ## Receiving needs no wallet
 
@@ -27,7 +28,7 @@ task-node … --reward-payee qcoin=<owner script hash, 64 hex digits>
 - Spending, balances and key storage belong to a wallet the operator runs separately
   (stage 3). The task node never needs it.
 
-Today the payee is not configurable: `task_submitter` pays to
+Until 2026-10-06 the payee was not configurable: `task_submitter` paid
 `blake3(worker_node_id)`, which no key controls.
 
 ## The standard payee script
@@ -35,12 +36,18 @@ Today the payee is not configurable: `task_submitter` pays to
 An owner script hash is the hash of a script, so a payee needs one standard
 single-key script that the operator's key can later spend:
 
-1. The operator makes a keypair. `qcoin-node keygen` exists but prints the private
-   key to stdout as JSON. It should write `<name>.<scheme>.key` (mode 0600) and
-   `<name>.<scheme>.pub`, the layout of the existing keys in `~/.loadngo/keys`.
-2. A new `qcoin-node payee --public-key <file.pub>` prints the owner script hash of
-   the standard single-key script for that key.
-3. The operator passes that hash to `--reward-payee`.
+1. The operator makes a keypair, one per task node (Jay, 2026-10-06):
+   `qcoin-node keygen > worker-1.qcoin-key.json`. `keygen` prints the private key
+   to stdout as JSON, so keep that file private (mode 0600). It should write
+   `<name>.<scheme>.key` and `<name>.<scheme>.pub` itself, the layout of the
+   existing keys in `~/.loadngo/keys`; not done yet.
+2. `qcoin-node payee --keypair-json worker-1.qcoin-key.json` prints the owner script
+   hash of the standard single-key script for that key (only the public half is
+   read; `--public-key-hex` with `--scheme` also works). The script is
+   `qcoin_ledger::single_key_script`, `[PushBytes(public key), CheckSig]`; the
+   ledger's spend test uses the same function, so a payee printed here is one that
+   key can spend.
+3. The operator passes that hash to `--reward-payee qcoin=<hash>`.
 
 A script made of `Nop` alone, as the ledger tests use, is spendable by anyone and must
 never be a payee.
@@ -88,18 +95,36 @@ signature.
 
 ### Stage 1: payee at launch, proof of accepted work
 
-The initial implementation.
+Built 2026-10-06.
 
-- Worker operator: keypair, `qcoin-node payee`, `task-node --reward-payee qcoin=<hash>`.
-- Submitter operator: `task_submitter --reward qcoin="qcoin-node task-reward settle …"`.
-- `task-reward settle` writes what the runtime writes today, a metadata-only output
-  whose `metadata_hash` is the completion receipt's commitment, now owned by the
-  worker's payee. No value moves; the output is the worker's on-chain proof of
-  accepted work.
-- `task-reward verify` lets a worker confirm a settlement reference: the transaction
-  is in a block, pays its payee, and commits to its receipt.
-- Needs: the standard payee script and `qcoin-node payee`; the settle and verify
-  subcommands. Not needed: a wallet, or any QCoin balance.
+```sh
+# worker operator, once per task node
+qcoin-node keygen > worker-1.qcoin-key.json
+qcoin-node payee --keypair-json worker-1.qcoin-key.json      # prints <hash>
+task-node … --reward-payee qcoin=<hash> \
+  --reward-verify 'qcoin=qcoin-node task-reward verify --target <node> --payee <hash>'
+
+# submitter operator
+task_submitter … --reward 'qcoin=qcoin-node task-reward settle --target <node>'
+```
+
+- `task-reward settle` reads the settle request on stdin and submits one output to
+  the payee carrying no assets, whose `metadata_hash` is the completion receipt's
+  commitment. No value moves; the output is the worker's on-chain proof of accepted
+  work. It then looks for the transaction in each new block, once a second on
+  proactor timers, until the request's `wait_seconds` (30 by default): `settled`
+  with `qcoin:tx:<id>@height:<n>`, or `pending` with `qcoin:tx:<id>`. An unreachable
+  node, an unusable payee or a refused transaction gives `failed`.
+- `task-reward verify` reads a settlement and exits 0 when its transaction is in a
+  block and, with `--payee`, pays that payee; it prints the settlement as it now
+  stands, so a `pending` one comes back `settled` once included. It does not check
+  the commitment against the worker's own copy of the receipt.
+- Not needed: a wallet, or any QCoin balance.
+- Checked: unit tests against a fake chain (settled with height and payee, pending
+  past the deadline, failures, verify before and after inclusion); and on a Mac with
+  a local `qcoin-node run`, loadngo `task-node` and `task_submitter`: settled in
+  block 1, the worker's verifier confirming it pays its payee, and with the node
+  stopped, the work accepted with the reward `failed`.
 
 ### Stage 2: value-bearing rewards
 

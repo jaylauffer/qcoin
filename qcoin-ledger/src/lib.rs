@@ -86,6 +86,24 @@ fn hash_bytes(data: &[u8]) -> Hash256 {
     *blake3::hash(data).as_bytes()
 }
 
+/// The `owner_script_hash` an output must carry for `script` to spend it: a spender
+/// presents `script` in its witness, and the ledger checks it hashes to this.
+pub fn owner_script_hash(script: &Script) -> Hash256 {
+    hash_bytes(&script_codec::encode_script(script))
+}
+
+/// The standard single-key script: spendable by a signature from `public_key`'s
+/// private key, given as the witness's unlock data. Its `owner_script_hash` is what a
+/// Task worker names as its payee (`qcoin-node payee`).
+pub fn single_key_script(
+    public_key: &qcoin_crypto::PublicKey,
+) -> Result<Script, qcoin_crypto::CryptoError> {
+    Ok(Script(vec![
+        qcoin_script::OpCode::PushBytes(public_key.to_bytes()?),
+        qcoin_script::OpCode::CheckSig,
+    ]))
+}
+
 struct LedgerScriptHost<'a> {
     utxos: &'a UtxoSet,
     current_height: u64,
@@ -1029,11 +1047,7 @@ mod tests {
             .get(&SignatureSchemeId::Dilithium2)
             .expect("scheme should exist");
         let (pk, sk) = scheme.keygen().expect("keygen should work");
-        let script = Script(vec![
-            OpCode::PushBytes(pk.to_bytes().expect("pk to bytes")),
-            OpCode::CheckSig,
-        ]);
-        (script, sk)
+        (super::single_key_script(&pk).expect("pk to bytes"), sk)
     }
 
     fn sign_input(tx: &Transaction, prev: &Output, sk: &PrivateKey) -> Vec<u8> {
