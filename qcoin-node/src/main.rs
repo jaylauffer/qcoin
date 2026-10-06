@@ -19,9 +19,6 @@ use std::{
     time::Duration,
 };
 
-#[cfg(unix)]
-use std::net::IpAddr;
-
 const DEFAULT_CHAIN_ID: u32 = 0;
 const DEFAULT_IPV6_MULTICAST_GROUP: Ipv6Addr =
     Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0x5143, 0x6f69, 0x6e);
@@ -1246,10 +1243,10 @@ fn expand_multicast_configs(
     for entry in v6.iter().copied() {
         let interfaces = match entry.interface {
             Some(interface) => vec![interface],
-            None => match resolve_ipv6_multicast_interfaces(bind_addr) {
+            None => match network::interfaces::ipv6_multicast_interfaces(bind_addr) {
                 Ok(interfaces) => interfaces,
                 Err(_err) if best_effort_auto => continue,
-                Err(err) => return Err(err),
+                Err(err) => return Err(format!("choosing IPv6 multicast interfaces: {err}")),
             },
         };
         for interface in interfaces {
@@ -1264,168 +1261,6 @@ fn expand_multicast_configs(
     }
 
     Ok(configs)
-}
-
-fn resolve_ipv6_multicast_interfaces(bind_addr: std::net::SocketAddr) -> Result<Vec<u32>, String> {
-    if let std::net::SocketAddr::V6(addr) = bind_addr {
-        if addr.scope_id() != 0 {
-            return Ok(vec![addr.scope_id()]);
-        }
-    }
-    #[cfg(unix)]
-    if let Some(indices) = discover_ipv6_multicast_interfaces_for_bind_addr(bind_addr)? {
-        return Ok(indices);
-    }
-    discover_ipv6_multicast_interfaces()
-}
-
-#[cfg(unix)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct InterfaceCandidate {
-    index: u32,
-    ip: IpAddr,
-    is_loopback: bool,
-}
-
-#[cfg(unix)]
-fn discover_ipv6_multicast_interfaces_for_bind_addr(
-    bind_addr: std::net::SocketAddr,
-) -> Result<Option<Vec<u32>>, String> {
-    let bind_ip = match bind_addr {
-        std::net::SocketAddr::V4(addr) if !addr.ip().is_unspecified() => IpAddr::V4(*addr.ip()),
-        std::net::SocketAddr::V6(addr) if !addr.ip().is_unspecified() => IpAddr::V6(*addr.ip()),
-        _ => return Ok(None),
-    };
-
-    let candidates = discover_multicast_interface_candidates()?;
-    let preferred = select_multicast_interfaces_for_bind_ip(bind_ip, &candidates);
-    if preferred.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(preferred))
-    }
-}
-
-#[cfg(unix)]
-fn select_multicast_interfaces_for_bind_ip(
-    bind_ip: IpAddr,
-    candidates: &[InterfaceCandidate],
-) -> Vec<u32> {
-    let mut non_loopback = Vec::new();
-    let mut loopback = Vec::new();
-
-    for candidate in candidates {
-        if candidate.ip != bind_ip {
-            continue;
-        }
-        let target = if candidate.is_loopback {
-            &mut loopback
-        } else {
-            &mut non_loopback
-        };
-        if !target.contains(&candidate.index) {
-            target.push(candidate.index);
-        }
-    }
-
-    if !non_loopback.is_empty() {
-        return non_loopback;
-    }
-    loopback
-}
-
-#[cfg(unix)]
-fn discover_ipv6_multicast_interfaces() -> Result<Vec<u32>, String> {
-    let candidates = discover_multicast_interface_candidates()?;
-    let mut non_loopback = Vec::new();
-    let mut loopback = Vec::new();
-
-    for candidate in candidates {
-        if !matches!(candidate.ip, IpAddr::V6(_)) {
-            continue;
-        }
-        let target = if candidate.is_loopback {
-            &mut loopback
-        } else {
-            &mut non_loopback
-        };
-        if !target.contains(&candidate.index) {
-            target.push(candidate.index);
-        }
-    }
-
-    if !non_loopback.is_empty() {
-        return Ok(non_loopback);
-    }
-    if !loopback.is_empty() {
-        return Ok(loopback);
-    }
-    Err("no IPv6 multicast-capable interfaces found".to_string())
-}
-
-// libc's interface field and flag types differ between Unix targets, so the
-// `as i32` casts are needed on some even where they are no-ops on others.
-#[cfg(unix)]
-#[allow(clippy::unnecessary_cast)]
-fn discover_multicast_interface_candidates() -> Result<Vec<InterfaceCandidate>, String> {
-    use std::ptr;
-
-    let mut head = ptr::null_mut();
-    if unsafe { libc::getifaddrs(&mut head) } != 0 {
-        return Err(format!(
-            "failed to inspect local interfaces: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    let mut candidates = Vec::new();
-    let mut cursor = head;
-    while !cursor.is_null() {
-        let entry = unsafe { &*cursor };
-        if !entry.ifa_addr.is_null() {
-            let family = unsafe { (*entry.ifa_addr).sa_family as i32 };
-            let flags = entry.ifa_flags as i32;
-            let is_up = flags & libc::IFF_UP as i32 != 0;
-            let supports_multicast = flags & libc::IFF_MULTICAST as i32 != 0;
-            if is_up && supports_multicast {
-                let index = unsafe { libc::if_nametoindex(entry.ifa_name) };
-                if index != 0 {
-                    let is_loopback = flags & libc::IFF_LOOPBACK as i32 != 0;
-                    let ip = match family {
-                        libc::AF_INET => {
-                            let addr = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in) };
-                            IpAddr::V4(Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr)))
-                        }
-                        libc::AF_INET6 => {
-                            let addr = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in6) };
-                            IpAddr::V6(Ipv6Addr::from(addr.sin6_addr.s6_addr))
-                        }
-                        _ => {
-                            cursor = entry.ifa_next;
-                            continue;
-                        }
-                    };
-                    candidates.push(InterfaceCandidate {
-                        index,
-                        ip,
-                        is_loopback,
-                    });
-                }
-            }
-        }
-        cursor = entry.ifa_next;
-    }
-    unsafe { libc::freeifaddrs(head) };
-
-    Ok(candidates)
-}
-
-#[cfg(not(unix))]
-fn discover_ipv6_multicast_interfaces() -> Result<Vec<u32>, String> {
-    Err(
-        "automatic IPv6 multicast interface discovery is not available on this platform"
-            .to_string(),
-    )
 }
 
 fn resolve_produce_mode(
@@ -1850,8 +1685,6 @@ mod tests {
     use qcoin_types::{AssetAmount, AssetDefinition, AssetId, AssetKind, Output};
     use std::collections::HashMap;
     use std::net::Ipv6Addr;
-    #[cfg(unix)]
-    use std::net::{IpAddr, Ipv4Addr};
     use tempfile::tempdir;
 
     #[test]
@@ -1886,53 +1719,25 @@ mod tests {
         assert_eq!(configs[0].interface, None);
     }
 
-    #[cfg(unix)]
+    /// The default multicast group is joined on interfaces found by loadngo's
+    /// `network::interfaces`, so listing them must work wherever qcoin runs.
+    /// qcoin CI runs this on Windows, which loadngo's own CI often cannot.
     #[test]
-    fn bind_ip_prefers_matching_non_loopback_multicast_interface() {
-        let selected = super::select_multicast_interfaces_for_bind_ip(
-            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 146)),
-            &[
-                super::InterfaceCandidate {
-                    index: 7,
-                    ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
-                    is_loopback: false,
-                },
-                super::InterfaceCandidate {
-                    index: 16,
-                    ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 146)),
-                    is_loopback: false,
-                },
-                super::InterfaceCandidate {
-                    index: 20,
-                    ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
-                    is_loopback: false,
-                },
-            ],
-        );
+    fn default_multicast_finds_interfaces_on_this_platform() {
+        let addresses =
+            network::interfaces::multicast_interface_addresses().expect("listing interfaces");
+        eprintln!("multicast-capable interface addresses: {addresses:?}");
 
-        assert_eq!(selected, vec![16]);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn bind_ip_falls_back_to_loopback_only_when_needed() {
-        let selected = super::select_multicast_interfaces_for_bind_ip(
-            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-            &[
-                super::InterfaceCandidate {
-                    index: 1,
-                    ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-                    is_loopback: true,
-                },
-                super::InterfaceCandidate {
-                    index: 7,
-                    ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 146)),
-                    is_loopback: false,
-                },
-            ],
-        );
-
-        assert_eq!(selected, vec![1]);
+        let bind_addr = "[::]:5143".parse().unwrap();
+        let configs =
+            super::expand_multicast_configs(bind_addr, &[], &default_multicast_v6_configs(), false);
+        let has_ipv6 = addresses.iter().any(|address| address.ip.is_ipv6());
+        if has_ipv6 {
+            let configs = configs.expect("an IPv6 multicast interface");
+            assert!(!configs.is_empty());
+        } else {
+            assert!(configs.is_err());
+        }
     }
 
     #[test]
