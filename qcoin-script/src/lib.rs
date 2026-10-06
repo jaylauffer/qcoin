@@ -9,6 +9,15 @@ const DEFAULT_MAX_STACK_ITEMS: usize = 1_024;
 const DEFAULT_MAX_PUSH_BYTES: usize = 4 * 1024;
 const DEFAULT_MAX_SCRIPT_LEN: usize = 2_048;
 
+/// Script operations.
+///
+/// An output commits to a locking script by hash. The spender supplies the
+/// locking script and, separately, its unlocking data, which is pushed onto the
+/// stack before the script runs and is not part of the hash. A check pops the
+/// values the locking script pushed (public keys, an expected hash) before the
+/// values the spender supplied (signatures, a preimage), so the standard
+/// single-key lock is `[PushBytes(public key), CheckSig]` with the signature as
+/// its unlocking data.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum OpCode {
     CheckSig,
@@ -51,8 +60,10 @@ pub enum ScriptError {
 }
 
 pub trait ScriptEngine {
+    /// Runs `script` after pushing `unlock`, in order, onto an empty stack.
     fn eval<H: ScriptHost>(
         &self,
+        unlock: &[Vec<u8>],
         script: &Script,
         ctx: &ScriptContext,
         host: &H,
@@ -198,6 +209,7 @@ impl Stack {
 impl ScriptEngine for DeterministicScriptEngine {
     fn eval<H: ScriptHost>(
         &self,
+        unlock: &[Vec<u8>],
         script: &Script,
         ctx: &ScriptContext,
         host: &H,
@@ -209,6 +221,11 @@ impl ScriptEngine for DeterministicScriptEngine {
         let mut gas = GasMeter::new(self.config.max_gas);
         let mut stack = Stack::new(self.config.max_stack_items);
         let registry = default_registry();
+
+        for item in unlock {
+            gas.consume(push_cost(item.len(), self.config.max_push_bytes)?)?;
+            stack.push(item.clone())?;
+        }
 
         for op in &script.0 {
             let op_cost = gas_cost(op, self.config.max_push_bytes)?;
@@ -225,8 +242,8 @@ impl ScriptEngine for DeterministicScriptEngine {
                 }
                 OpCode::Nop => {}
                 OpCode::CheckSig => {
-                    let signature_bytes = stack.pop()?;
                     let public_key_bytes = stack.pop()?;
+                    let signature_bytes = stack.pop()?;
 
                     let public_key = PublicKey::from_bytes(&public_key_bytes).map_err(|err| {
                         ScriptError::Evaluation(format!("invalid public key: {err}"))
@@ -271,15 +288,6 @@ impl ScriptEngine for DeterministicScriptEngine {
                         ));
                     }
 
-                    let mut signatures = Vec::with_capacity(threshold);
-                    for _ in 0..threshold {
-                        let sig_bytes = stack.pop()?;
-                        let signature = Signature::from_bytes(&sig_bytes).map_err(|err| {
-                            ScriptError::Evaluation(format!("invalid signature: {err}"))
-                        })?;
-                        signatures.push(signature);
-                    }
-
                     let mut pubkeys = Vec::with_capacity(total);
                     for _ in 0..total {
                         let pk_bytes = stack.pop()?;
@@ -287,6 +295,15 @@ impl ScriptEngine for DeterministicScriptEngine {
                             ScriptError::Evaluation(format!("invalid public key: {err}"))
                         })?;
                         pubkeys.push(public_key);
+                    }
+
+                    let mut signatures = Vec::with_capacity(threshold);
+                    for _ in 0..threshold {
+                        let sig_bytes = stack.pop()?;
+                        let signature = Signature::from_bytes(&sig_bytes).map_err(|err| {
+                            ScriptError::Evaluation(format!("invalid signature: {err}"))
+                        })?;
+                        signatures.push(signature);
                     }
 
                     for (idx, signature) in signatures.iter().enumerate() {
@@ -400,8 +417,8 @@ impl ScriptEngine for DeterministicScriptEngine {
                     }
                 }
                 OpCode::CheckHashLock => {
-                    let preimage = stack.pop()?;
                     let expected_hash = stack.pop()?;
+                    let preimage = stack.pop()?;
 
                     if expected_hash.len() != 32 {
                         return Err(ScriptError::Evaluation(
@@ -425,21 +442,24 @@ impl ScriptEngine for DeterministicScriptEngine {
     }
 }
 
+const BASE_COST: u64 = 10;
+
+fn push_cost(len: usize, max_push_bytes: usize) -> Result<u64, ScriptError> {
+    if len > max_push_bytes {
+        return Err(ScriptError::Evaluation(
+            "push exceeds byte limit".to_string(),
+        ));
+    }
+    Ok(BASE_COST + len as u64)
+}
+
 fn gas_cost(op: &OpCode, max_push_bytes: usize) -> Result<u64, ScriptError> {
-    const BASE_COST: u64 = 10;
     const SIG_COST: u64 = 5_000;
     const HASH_COST: u64 = 250;
 
     match op {
         OpCode::Nop => Ok(1),
-        OpCode::PushBytes(data) => {
-            if data.len() > max_push_bytes {
-                return Err(ScriptError::Evaluation(
-                    "push exceeds byte limit".to_string(),
-                ));
-            }
-            Ok(BASE_COST + data.len() as u64)
-        }
+        OpCode::PushBytes(data) => push_cost(data.len(), max_push_bytes),
         OpCode::CheckSig => Ok(SIG_COST),
         OpCode::CheckMultiSig { threshold, .. } => Ok(SIG_COST * (*threshold as u64).max(1)),
         OpCode::CheckTimeLock | OpCode::CheckRelativeTimeLock => Ok(BASE_COST),
@@ -535,7 +555,6 @@ mod tests {
         let (tx, input) = sample_tx();
         let script = Script(vec![
             OpCode::PushBytes(pk.to_bytes().expect("pk to bytes")),
-            OpCode::PushBytes(Vec::new()),
             OpCode::CheckSig,
         ]);
 
@@ -543,12 +562,7 @@ mod tests {
         let prev_output = tx.core.outputs[0].clone();
         let sighash = tx.sighash(0, &prev_output, script_hash, 0, SighashFlags::default());
         let signature = scheme.sign(&sk, &sighash).expect("signing should work");
-
-        let script = Script(vec![
-            OpCode::PushBytes(pk.to_bytes().expect("pk to bytes")),
-            OpCode::PushBytes(signature.to_bytes().expect("sig to bytes")),
-            OpCode::CheckSig,
-        ]);
+        let unlock = vec![signature.to_bytes().expect("sig to bytes")];
 
         let host = StaticHost::new(Some(10)).with_input(
             input.clone(),
@@ -567,9 +581,64 @@ mod tests {
         };
 
         let engine = default_engine();
-        let result = engine.eval(&script, &ctx, &host);
-
+        let result = engine.eval(&unlock, &script, &ctx, &host);
         assert!(result.is_ok());
+
+        let result = engine.eval(&[], &script, &ctx, &host);
+        assert!(matches!(result, Err(ScriptError::StackUnderflow)));
+    }
+
+    #[test]
+    fn checks_two_of_two_multisig_with_signatures_as_unlocking_data() {
+        let registry = default_registry();
+        let scheme = registry
+            .get(&SignatureSchemeId::Dilithium2)
+            .expect("scheme should exist");
+        let (pk1, sk1) = scheme.keygen().expect("keygen should work");
+        let (pk2, sk2) = scheme.keygen().expect("keygen should work");
+
+        let (tx, input) = sample_tx();
+        let script = Script(vec![
+            OpCode::PushBytes(pk1.to_bytes().expect("pk to bytes")),
+            OpCode::PushBytes(pk2.to_bytes().expect("pk to bytes")),
+            OpCode::CheckMultiSig {
+                threshold: 2,
+                total: 2,
+            },
+        ]);
+        let script_hash = script_hash(&script);
+        let prev_output = tx.core.outputs[0].clone();
+        let sighash = tx.sighash(0, &prev_output, script_hash, 0, SighashFlags::default());
+        let sig1 = scheme.sign(&sk1, &sighash).expect("signing should work");
+        let sig2 = scheme.sign(&sk2, &sighash).expect("signing should work");
+        let sig1 = sig1.to_bytes().expect("sig to bytes");
+        let sig2 = sig2.to_bytes().expect("sig to bytes");
+
+        let host = StaticHost::new(Some(10)).with_input(
+            input,
+            ResolvedInput {
+                output: prev_output,
+                created_height: Some(1),
+            },
+        );
+        let ctx = ScriptContext {
+            tx,
+            input_index: 0,
+            current_height: Some(10),
+            chain_id: 0,
+            script_hash,
+        };
+        let engine = DeterministicScriptEngine::default();
+
+        // Signatures go in the same order as the keys.
+        let result = engine.eval(&[sig1.clone(), sig2.clone()], &script, &ctx, &host);
+        assert!(result.is_ok(), "{result:?}");
+
+        let result = engine.eval(&[sig2, sig1.clone()], &script, &ctx, &host);
+        assert!(matches!(result, Err(ScriptError::Evaluation(_))));
+
+        let result = engine.eval(&[sig1], &script, &ctx, &host);
+        assert!(matches!(result, Err(ScriptError::StackUnderflow)));
     }
 
     #[test]
@@ -587,9 +656,9 @@ mod tests {
 
         let script = Script(vec![
             OpCode::PushBytes(pk.to_bytes().expect("pk to bytes")),
-            OpCode::PushBytes(bad_signature.to_bytes().expect("sig to bytes")),
             OpCode::CheckSig,
         ]);
+        let unlock = vec![bad_signature.to_bytes().expect("sig to bytes")];
 
         let script_hash = script_hash(&script);
 
@@ -610,7 +679,7 @@ mod tests {
         };
 
         let engine = default_engine();
-        let result = engine.eval(&script, &ctx, &host);
+        let result = engine.eval(&unlock, &script, &ctx, &host);
 
         assert!(matches!(result, Err(ScriptError::Evaluation(_))));
     }
@@ -643,7 +712,7 @@ mod tests {
         };
 
         let engine = default_engine();
-        let result = engine.eval(&script, &ctx, &host);
+        let result = engine.eval(&[], &script, &ctx, &host);
         assert!(matches!(result, Err(ScriptError::Evaluation(_))));
 
         let host = StaticHost::new(Some(12)).with_input(
@@ -661,7 +730,7 @@ mod tests {
             script_hash,
         };
 
-        let result = engine.eval(&script, &ctx, &host);
+        let result = engine.eval(&[], &script, &ctx, &host);
         assert!(result.is_ok());
     }
 
@@ -689,7 +758,7 @@ mod tests {
             script_hash,
         };
         let engine = default_engine();
-        let result = engine.eval(&script, &ctx, &host);
+        let result = engine.eval(&[], &script, &ctx, &host);
         assert!(matches!(result, Err(ScriptError::Evaluation(_))));
 
         let host = StaticHost::new(Some(9)).with_input(input, resolved);
@@ -700,7 +769,7 @@ mod tests {
             chain_id: 0,
             script_hash,
         };
-        let result = engine.eval(&script, &ctx, &host);
+        let result = engine.eval(&[], &script, &ctx, &host);
         assert!(result.is_ok());
     }
 
@@ -711,8 +780,7 @@ mod tests {
         let expected_hash = hash(&preimage).as_bytes().to_vec();
 
         let script = Script(vec![
-            OpCode::PushBytes(expected_hash.clone()),
-            OpCode::PushBytes(preimage.clone()),
+            OpCode::PushBytes(expected_hash),
             OpCode::CheckHashLock,
         ]);
 
@@ -733,15 +801,10 @@ mod tests {
             script_hash,
         };
         let engine = default_engine();
-        let result = engine.eval(&script, &ctx, &host);
+        let result = engine.eval(&[preimage], &script, &ctx, &host);
         assert!(result.is_ok());
 
-        let tampered_script = Script(vec![
-            OpCode::PushBytes(expected_hash),
-            OpCode::PushBytes(b"wrong".to_vec()),
-            OpCode::CheckHashLock,
-        ]);
-        let result = engine.eval(&tampered_script, &ctx, &host);
+        let result = engine.eval(&[b"wrong".to_vec()], &script, &ctx, &host);
         assert!(matches!(result, Err(ScriptError::Evaluation(_))));
     }
 
@@ -772,7 +835,55 @@ mod tests {
             ..VmConfig::default()
         });
 
-        let result = engine.eval(&script, &ctx, &host);
+        let result = engine.eval(&[], &script, &ctx, &host);
         assert!(matches!(result, Err(ScriptError::OutOfGas)));
+    }
+
+    #[test]
+    fn bounds_unlock_data_like_pushes() {
+        let (tx, input) = sample_tx();
+        let script = Script(vec![OpCode::Nop]);
+        let script_hash = script_hash(&script);
+        let host = StaticHost::new(Some(0)).with_input(
+            input,
+            ResolvedInput {
+                output: tx.core.outputs[0].clone(),
+                created_height: Some(0),
+            },
+        );
+        let ctx = ScriptContext {
+            tx,
+            input_index: 0,
+            current_height: Some(0),
+            chain_id: 0,
+            script_hash,
+        };
+
+        let engine = DeterministicScriptEngine::with_config(VmConfig {
+            max_gas: 100,
+            max_stack_items: 2,
+            max_push_bytes: 8,
+            ..VmConfig::default()
+        });
+
+        assert!(engine.eval(&[vec![0; 8]], &script, &ctx, &host).is_ok());
+        assert!(matches!(
+            engine.eval(&[vec![0; 9]], &script, &ctx, &host),
+            Err(ScriptError::Evaluation(_))
+        ));
+        assert!(matches!(
+            engine.eval(&[vec![], vec![], vec![]], &script, &ctx, &host),
+            Err(ScriptError::StackOverflow)
+        ));
+        // Each item costs 10 gas plus its length, so six 8-byte items exceed 100.
+        let engine = DeterministicScriptEngine::with_config(VmConfig {
+            max_gas: 100,
+            max_push_bytes: 8,
+            ..VmConfig::default()
+        });
+        assert!(matches!(
+            engine.eval(&vec![vec![0; 8]; 6], &script, &ctx, &host),
+            Err(ScriptError::OutOfGas)
+        ));
     }
 }
