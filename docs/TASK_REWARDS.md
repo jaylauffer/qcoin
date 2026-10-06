@@ -71,15 +71,18 @@ How it works now:
   such witnesses is live (the only one found is a `Nop` spend on agnes's April chain
   in `~/.qcoin`; the `chain1` data on agnes and dolores has no spends).
 
-Tests: `key_locked_output_is_spent_with_signature_as_unlocking_data`,
-and `key_locked_output_rejects_missing_or_foreign_signatures` in `qcoin-ledger`;
-`checks_two_of_two_multisig_with_signatures_as_unlocking_data` and
-`bounds_unlock_data_like_pushes` in `qcoin-script`.
+Tests: `key_locked_output_is_spent_with_signature_as_unlocking_data` and
+`key_locked_output_rejects_missing_or_foreign_signatures` in `qcoin-ledger`;
+`checks_signature_successfully` and `bounds_unlock_data_like_pushes` in
+`qcoin-script`.
 
-Still open: `CheckMultiSig` is not yet a real threshold. It pairs the n-th signature
-with the n-th key popped and checks only the first `threshold` keys, so a 2-of-3
-lock accepts only the last two keys. Task payees use the single-key script, so this
-does not block them.
+`CheckMultiSig` was not a real threshold until 2026-10-06: it paired the n-th
+signature with the n-th key popped, so a 2-of-3 lock accepted only two particular
+keys. Now any `threshold` of the `total` keys can sign: the spender supplies the
+signatures in the order of their keys, and each key signs at most once
+(`multisig_accepts_any_threshold_of_keys_with_signatures_in_key_order` in
+`qcoin-script`). Gas is charged per signature check made rather than per
+signature.
 
 ## Stages
 

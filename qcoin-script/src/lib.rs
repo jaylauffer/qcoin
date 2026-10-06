@@ -21,7 +21,14 @@ const DEFAULT_MAX_SCRIPT_LEN: usize = 2_048;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum OpCode {
     CheckSig,
-    CheckMultiSig { threshold: u8, total: u8 },
+    /// `threshold` of the `total` keys the locking script pushed must sign.
+    /// The spender supplies exactly `threshold` signatures, in the same order
+    /// as their keys; each key signs at most once. Gas is charged per
+    /// signature check made, at most `total`.
+    CheckMultiSig {
+        threshold: u8,
+        total: u8,
+    },
     CheckTimeLock,
     CheckRelativeTimeLock,
     CheckHashLock,
@@ -288,6 +295,9 @@ impl ScriptEngine for DeterministicScriptEngine {
                         ));
                     }
 
+                    // The keys were pushed by the locking script and the
+                    // signatures by the spender, each in order, so both come
+                    // off the stack reversed.
                     let mut pubkeys = Vec::with_capacity(total);
                     for _ in 0..total {
                         let pk_bytes = stack.pop()?;
@@ -296,6 +306,7 @@ impl ScriptEngine for DeterministicScriptEngine {
                         })?;
                         pubkeys.push(public_key);
                     }
+                    pubkeys.reverse();
 
                     let mut signatures = Vec::with_capacity(threshold);
                     for _ in 0..threshold {
@@ -305,41 +316,46 @@ impl ScriptEngine for DeterministicScriptEngine {
                         })?;
                         signatures.push(signature);
                     }
+                    signatures.reverse();
 
-                    for (idx, signature) in signatures.iter().enumerate() {
-                        let public_key = pubkeys.get(idx).ok_or_else(|| {
-                            ScriptError::Evaluation(
-                                "multisig stack did not contain enough public keys".to_string(),
-                            )
+                    let prev_output = host
+                        .input_utxo(ctx.tx.core.inputs.get(ctx.input_index).ok_or_else(|| {
+                            ScriptError::Evaluation("input index out of bounds".to_string())
+                        })?)
+                        .ok_or_else(|| {
+                            ScriptError::Evaluation("host could not resolve input".to_string())
                         })?;
+                    let sighash = ctx.tx.sighash(
+                        ctx.input_index,
+                        &prev_output.output,
+                        ctx.script_hash,
+                        ctx.chain_id,
+                        SighashFlags::default(),
+                    );
 
-                        let scheme = registry.get(&public_key.scheme).ok_or_else(|| {
-                            ScriptError::Evaluation("signature scheme not registered".to_string())
-                        })?;
-
-                        let prev_output = host
-                            .input_utxo(ctx.tx.core.inputs.get(ctx.input_index).ok_or_else(
-                                || ScriptError::Evaluation("input index out of bounds".to_string()),
-                            )?)
-                            .ok_or_else(|| {
-                                ScriptError::Evaluation("host could not resolve input".to_string())
-                            })?;
-
-                        let sighash = ctx.tx.sighash(
-                            ctx.input_index,
-                            &prev_output.output,
-                            ctx.script_hash,
-                            ctx.chain_id,
-                            SighashFlags::default(),
-                        );
-
-                        scheme
-                            .verify(public_key, &sighash, signature)
-                            .map_err(|err| {
-                                ScriptError::Evaluation(format!(
-                                    "multisig verification failed: {err}"
-                                ))
-                            })?;
+                    // Signatures must be in the order of their keys, and each
+                    // key signs at most once: walk the keys once, matching
+                    // each signature to the next key that verifies it. A key
+                    // that does not verify the current signature is skipped
+                    // for good, so this is at most `total` checks.
+                    let mut keys = pubkeys.iter();
+                    for (matched, signature) in signatures.iter().enumerate() {
+                        loop {
+                            let remaining_keys = keys.len();
+                            if remaining_keys < threshold - matched {
+                                return Err(ScriptError::Evaluation(
+                                    "multisig threshold not met".to_string(),
+                                ));
+                            }
+                            let public_key = keys.next().expect("checked remaining keys");
+                            let Some(scheme) = registry.get(&public_key.scheme) else {
+                                continue;
+                            };
+                            gas.consume(SIG_COST)?;
+                            if scheme.verify(public_key, &sighash, signature).is_ok() {
+                                break;
+                            }
+                        }
                     }
                 }
                 OpCode::CheckTimeLock => {
@@ -453,15 +469,17 @@ fn push_cost(len: usize, max_push_bytes: usize) -> Result<u64, ScriptError> {
     Ok(BASE_COST + len as u64)
 }
 
+/// One signature check. `CheckMultiSig` pays it per check it makes.
+const SIG_COST: u64 = 5_000;
+
 fn gas_cost(op: &OpCode, max_push_bytes: usize) -> Result<u64, ScriptError> {
-    const SIG_COST: u64 = 5_000;
     const HASH_COST: u64 = 250;
 
     match op {
         OpCode::Nop => Ok(1),
         OpCode::PushBytes(data) => push_cost(data.len(), max_push_bytes),
         OpCode::CheckSig => Ok(SIG_COST),
-        OpCode::CheckMultiSig { threshold, .. } => Ok(SIG_COST * (*threshold as u64).max(1)),
+        OpCode::CheckMultiSig { .. } => Ok(BASE_COST),
         OpCode::CheckTimeLock | OpCode::CheckRelativeTimeLock => Ok(BASE_COST),
         OpCode::CheckHashLock => Ok(HASH_COST),
     }
@@ -588,31 +606,43 @@ mod tests {
         assert!(matches!(result, Err(ScriptError::StackUnderflow)));
     }
 
-    #[test]
-    fn checks_two_of_two_multisig_with_signatures_as_unlocking_data() {
+    /// A `threshold`-of-`key_count` lock, the context to spend it, and each
+    /// key's signature over that spend.
+    fn multisig_spend(
+        threshold: u8,
+        key_count: usize,
+    ) -> (Script, ScriptContext, StaticHost, Vec<Vec<u8>>) {
         let registry = default_registry();
         let scheme = registry
             .get(&SignatureSchemeId::Dilithium2)
             .expect("scheme should exist");
-        let (pk1, sk1) = scheme.keygen().expect("keygen should work");
-        let (pk2, sk2) = scheme.keygen().expect("keygen should work");
+        let keys: Vec<_> = (0..key_count)
+            .map(|_| scheme.keygen().expect("keygen should work"))
+            .collect();
 
         let (tx, input) = sample_tx();
-        let script = Script(vec![
-            OpCode::PushBytes(pk1.to_bytes().expect("pk to bytes")),
-            OpCode::PushBytes(pk2.to_bytes().expect("pk to bytes")),
-            OpCode::CheckMultiSig {
-                threshold: 2,
-                total: 2,
-            },
-        ]);
+        let mut ops: Vec<OpCode> = keys
+            .iter()
+            .map(|(pk, _)| OpCode::PushBytes(pk.to_bytes().expect("pk to bytes")))
+            .collect();
+        ops.push(OpCode::CheckMultiSig {
+            threshold,
+            total: key_count as u8,
+        });
+        let script = Script(ops);
         let script_hash = script_hash(&script);
         let prev_output = tx.core.outputs[0].clone();
         let sighash = tx.sighash(0, &prev_output, script_hash, 0, SighashFlags::default());
-        let sig1 = scheme.sign(&sk1, &sighash).expect("signing should work");
-        let sig2 = scheme.sign(&sk2, &sighash).expect("signing should work");
-        let sig1 = sig1.to_bytes().expect("sig to bytes");
-        let sig2 = sig2.to_bytes().expect("sig to bytes");
+        let signatures = keys
+            .iter()
+            .map(|(_, sk)| {
+                scheme
+                    .sign(sk, &sighash)
+                    .expect("signing should work")
+                    .to_bytes()
+                    .expect("sig to bytes")
+            })
+            .collect();
 
         let host = StaticHost::new(Some(10)).with_input(
             input,
@@ -628,17 +658,84 @@ mod tests {
             chain_id: 0,
             script_hash,
         };
-        let engine = DeterministicScriptEngine::default();
+        (script, ctx, host, signatures)
+    }
 
-        // Signatures go in the same order as the keys.
-        let result = engine.eval(&[sig1.clone(), sig2.clone()], &script, &ctx, &host);
+    #[test]
+    fn multisig_accepts_any_threshold_of_keys_with_signatures_in_key_order() {
+        let (script, ctx, host, sigs) = multisig_spend(2, 3);
+        let engine = default_engine();
+        let eval = |unlock: &[&Vec<u8>]| {
+            let unlock: Vec<Vec<u8>> = unlock.iter().map(|sig| (*sig).clone()).collect();
+            engine.eval(&unlock, &script, &ctx, &host)
+        };
+
+        for (a, b) in [(0, 1), (0, 2), (1, 2)] {
+            let result = eval(&[&sigs[a], &sigs[b]]);
+            assert!(result.is_ok(), "keys {a} and {b}: {result:?}");
+        }
+
+        // Out of key order, the same key twice, or too few signatures.
+        assert!(matches!(
+            eval(&[&sigs[2], &sigs[0]]),
+            Err(ScriptError::Evaluation(_))
+        ));
+        assert!(matches!(
+            eval(&[&sigs[1], &sigs[1]]),
+            Err(ScriptError::Evaluation(_))
+        ));
+        assert!(matches!(
+            eval(&[&sigs[1]]),
+            Err(ScriptError::StackUnderflow)
+        ));
+
+        // A signature from a key outside the lock does not count.
+        let (_, _, _, foreign) = multisig_spend(1, 1);
+        assert!(matches!(
+            eval(&[&sigs[0], &foreign[0]]),
+            Err(ScriptError::Evaluation(_))
+        ));
+    }
+
+    #[test]
+    fn multisig_one_of_three_accepts_the_last_key() {
+        let (script, ctx, host, sigs) = multisig_spend(1, 3);
+        let engine = default_engine();
+        let result = engine.eval(&[sigs[2].clone()], &script, &ctx, &host);
         assert!(result.is_ok(), "{result:?}");
+    }
 
-        let result = engine.eval(&[sig2, sig1.clone()], &script, &ctx, &host);
-        assert!(matches!(result, Err(ScriptError::Evaluation(_))));
+    #[test]
+    fn multisig_pays_gas_per_signature_check() {
+        let (script, ctx, host, sigs) = multisig_spend(1, 3);
+        let unlock = [sigs[2].clone()];
+        let pushes: u64 = unlock
+            .iter()
+            .map(|item| item.len())
+            .chain(script.0.iter().filter_map(|op| match op {
+                OpCode::PushBytes(data) => Some(data.len()),
+                _ => None,
+            }))
+            .map(|len| BASE_COST + len as u64)
+            .sum();
+        // Matching the last of three keys takes three checks.
+        let needed = pushes + BASE_COST + 3 * SIG_COST;
 
-        let result = engine.eval(&[sig1], &script, &ctx, &host);
-        assert!(matches!(result, Err(ScriptError::StackUnderflow)));
+        let engine = DeterministicScriptEngine::with_config(VmConfig {
+            max_gas: needed,
+            ..VmConfig::default()
+        });
+        let result = engine.eval(&unlock, &script, &ctx, &host);
+        assert_eq!(result.expect("exactly enough gas").gas_consumed, needed);
+
+        let engine = DeterministicScriptEngine::with_config(VmConfig {
+            max_gas: needed - 1,
+            ..VmConfig::default()
+        });
+        assert!(matches!(
+            engine.eval(&unlock, &script, &ctx, &host),
+            Err(ScriptError::OutOfGas)
+        ));
     }
 
     #[test]
