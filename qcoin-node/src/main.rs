@@ -510,7 +510,6 @@ fn run_node(
         Arc::clone(&shutdown_requested),
     ) {
         eprintln!("{err}");
-        return;
     }
 }
 
@@ -1361,7 +1360,10 @@ fn discover_ipv6_multicast_interfaces() -> Result<Vec<u32>, String> {
     Err("no IPv6 multicast-capable interfaces found".to_string())
 }
 
+// libc's interface field and flag types differ between Unix targets, so the
+// `as i32` casts are needed on some even where they are no-ops on others.
 #[cfg(unix)]
+#[allow(clippy::unnecessary_cast)]
 fn discover_multicast_interface_candidates() -> Result<Vec<InterfaceCandidate>, String> {
     use std::ptr;
 
@@ -1440,7 +1442,7 @@ fn resolve_produce_mode(
 
 fn merge_unique_strings(primary: Vec<String>, extra: Vec<String>) -> Vec<String> {
     let mut merged = Vec::new();
-    for value in primary.into_iter().chain(extra.into_iter()) {
+    for value in primary.into_iter().chain(extra) {
         let trimmed = value.trim();
         if trimmed.is_empty() {
             continue;
@@ -1521,7 +1523,7 @@ impl From<&ChainState> for PersistedChainState {
                 definition: definition.clone(),
             })
             .collect::<Vec<_>>();
-        assets.sort_by(|left, right| left.asset_id.0.cmp(&right.asset_id.0));
+        assets.sort_by_key(|entry| entry.asset_id.0);
 
         Self {
             ledger: PersistedLedgerState { utxos, assets },
@@ -1806,7 +1808,7 @@ fn to_hex(bytes: &[u8]) -> String {
 
 fn from_hex(hex: &str) -> Result<Vec<u8>, String> {
     let clean = hex.trim();
-    if clean.len() % 2 != 0 {
+    if !clean.len().is_multiple_of(2) {
         return Err("hex string has odd length".to_string());
     }
 

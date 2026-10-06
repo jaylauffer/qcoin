@@ -157,6 +157,7 @@ impl TransactionCore {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SighashFlags(pub u32);
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_asset_transaction(
     issuer_script_hash: Hash256,
     kind: AssetKind,

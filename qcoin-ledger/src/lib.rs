@@ -136,7 +136,7 @@ impl LedgerState {
         }
 
         let mut assets: Vec<_> = self.assets.iter().collect();
-        assets.sort_by(|(a, _), (b, _)| a.0.cmp(&b.0));
+        assets.sort_by_key(|(asset_id, _)| asset_id.0);
 
         for (asset_id, definition) in assets {
             let mut encoded = Vec::new();
@@ -433,6 +433,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_create_asset_transaction(
         issuer_script: &Script,
         destination_script_hash: Hash256,
