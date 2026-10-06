@@ -28,6 +28,12 @@ cargo run -p qcoin-node -- run
 cargo run -p qcoin-node -- keygen
 ```
 
+qcoin builds against a `loadngo` checkout beside it (`../loadngo`). CI
+(`.github/workflows/ci.yml`) runs `cargo fmt --check`, strict clippy and the
+workspace tests on Linux x86-64 and arm64, macOS and Windows, with loadngo pinned
+to `LOADNGO_REV`; move that pin whenever `Cargo.lock` is refreshed for a newer
+loadngo.
+
 Runtime artifacts are written under `data/` by default (`data/qcoin-chain-state.json` and matching `*.blocks.json`), and are git-ignored.
 
 ## Consensus model
