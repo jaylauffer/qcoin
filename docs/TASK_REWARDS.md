@@ -6,7 +6,8 @@ and the stages from launch-time configuration to a wallet.
 The Task side is in loadngo `docs/TASK_REWARD_FLOW.md`: accepting the work never
 depends on the reward, each operator chooses the reward schemes it takes part in, and
 QCoin is the first-party settler, run as an external command. This document is the
-QCoin side of that plan. Written 2026-10-06; nothing in it is built yet.
+QCoin side of that plan. Written 2026-10-06. Only the ledger fix for spending
+key-locked outputs is built; the rest is not.
 
 ## Receiving needs no wallet
 
@@ -44,27 +45,42 @@ single-key script that the operator's key can later spend:
 A script made of `Nop` alone, as the ledger tests use, is spendable by anyone and must
 never be a payee.
 
-### Prerequisite: a key-locked output cannot be spent today
+### Spending a key-locked output (fixed 2026-10-06)
 
-Found by reading qcoin `4cb6407`; not yet confirmed by a test:
+Until 2026-10-06 (qcoin `efd8b79` and earlier) no `CheckSig` output could be spent
+through the ledger. The ledger requires the witness script to hash to the output's
+`owner_script_hash`, and `CheckSig` could only take its signature from a `PushBytes`
+in that same script. The signature signs a sighash that commits to that hash, so it
+cannot be in the script. A test against the old code confirmed it: the lock script
+alone failed with `ScriptFailed` (stack underflow), and the script with the signature
+inside failed with `ScriptHashMismatch`.
 
-- The ledger hashes the whole witness script and requires it to equal the spent
-  output's `owner_script_hash` (`qcoin-ledger/src/lib.rs`, in `apply_transaction`'s
-  input loop).
-- `CheckSig` takes the signature from the stack, and only `PushBytes` inside that same
-  script fills the stack (`qcoin-script/src/lib.rs`, `DeterministicScriptEngine::eval`).
-- So the signature is part of the hashed script. It signs a sighash that already
-  commits to that hash, so it cannot be known when the output is created, and no
-  `CheckSig` output can be spent through the ledger. The `CheckSig` test in
-  `qcoin-script` passes because it calls the engine directly with the hash of the
-  unsigned script.
+How it works now:
 
-The fix is for the witness to carry unlocking data (the signature) separately from the
-committed script, pushed before the script runs, so the standard payee script is
-`[PushBytes(public key), CheckSig]` and its hash is fixed in advance. This must be
-settled before payee hashes are handed out: an output sent to a hash of the wrong
-script form stays unspendable forever. Proof-only rewards (stage 1) carry no value, so
-they lose nothing if this comes later, but the payee hashes should not have to change.
+- A ledger witness carries `unlock`, a list of byte strings, beside `script` and
+  `metadata`. The engine pushes them, in order, before the script runs. They are not
+  part of the script hash. Each counts against the push size limit, the stack limit
+  and gas, like a `PushBytes`.
+- Checks pop what the locking script pushed before what the spender supplied:
+  `CheckSig` pops the public key, then the signature; `CheckMultiSig` pops the keys,
+  then the signatures; `CheckHashLock` pops the expected hash, then the preimage.
+- The standard single-key payee script is `[PushBytes(public key), CheckSig]`, with
+  the signature as its only unlocking item. Its hash is known before anything is
+  signed.
+- A witness written before `unlock` existed still decodes, with no unlocking data.
+  The only such spend found is a `Nop` spend on agnes's April chain in `~/.qcoin`.
+  The live `chain1` data on agnes and dolores has no spends.
+
+Tests: `key_locked_output_is_spent_with_signature_as_unlocking_data`,
+`key_locked_output_rejects_missing_or_foreign_signatures` and
+`legacy_witness_without_unlocking_data_still_decodes` in `qcoin-ledger`;
+`checks_two_of_two_multisig_with_signatures_as_unlocking_data` and
+`bounds_unlock_data_like_pushes` in `qcoin-script`.
+
+Still open: `CheckMultiSig` is not yet a real threshold. It pairs the n-th signature
+with the n-th key popped and checks only the first `threshold` keys, so a 2-of-3
+lock accepts only the last two keys. Task payees use the single-key script, so this
+does not block them.
 
 ## Stages
 
@@ -94,7 +110,6 @@ The reward carries an amount, so the submitter must fund it.
   unspent outputs go to the settler (in configuration, never over the Task protocol),
   and it pays the amount to the worker's payee with change back to the submitter.
 - Needs, beyond stage 1:
-  - spendable key-locked outputs (the prerequisite above);
   - a query for the unspent outputs owned by a script hash; `qcoin-node` has `run`,
     `submit-tx`, `node-info`, `tip`, `block`, `keygen` and `chain-state`, and none of
     them answers that;

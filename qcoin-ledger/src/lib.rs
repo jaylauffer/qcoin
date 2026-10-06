@@ -70,10 +70,40 @@ pub enum LedgerError {
     Other(String),
 }
 
+/// What a spender supplies for one input.
+///
+/// `script` must hash to the spent output's `owner_script_hash`; `unlock` (for
+/// example a signature) is pushed before the script runs and is not part of
+/// that hash, so an output can be locked to a key before anything is signed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct InputWitness {
     script: Script,
     metadata: Option<Vec<u8>>,
+    unlock: Vec<Vec<u8>>,
+}
+
+/// The witness before unlocking data existed, still found in older lab chains.
+#[derive(Deserialize)]
+struct LegacyInputWitness {
+    script: Script,
+    metadata: Option<Vec<u8>>,
+}
+
+impl InputWitness {
+    /// A legacy witness always ends where `unlock` would begin, so it never
+    /// decodes in the current form; it decodes with no unlocking data.
+    fn decode(bytes: &[u8]) -> Result<Self, LedgerError> {
+        if let Ok(witness) = bincode::deserialize::<InputWitness>(bytes) {
+            return Ok(witness);
+        }
+        let legacy: LegacyInputWitness =
+            bincode::deserialize(bytes).map_err(|_| LedgerError::InvalidWitness)?;
+        Ok(InputWitness {
+            script: legacy.script,
+            metadata: legacy.metadata,
+            unlock: Vec::new(),
+        })
+    }
 }
 
 fn hash_bytes(data: &[u8]) -> Hash256 {
@@ -203,8 +233,7 @@ impl LedgerState {
                 .get(input_index)
                 .ok_or(LedgerError::MissingWitness)?;
 
-            let witness: InputWitness =
-                bincode::deserialize(witness_bytes).map_err(|_| LedgerError::InvalidWitness)?;
+            let witness = InputWitness::decode(witness_bytes)?;
 
             let script_bytes = script_codec::encode_script(&witness.script);
             let script_hash = hash_bytes(&script_bytes);
@@ -238,7 +267,7 @@ impl LedgerState {
             }
 
             engine
-                .eval(&witness.script, &ctx, &host)
+                .eval(&witness.unlock, &witness.script, &ctx, &host)
                 .map_err(|_| LedgerError::ScriptFailed)?;
 
             consumed_utxos.push(key);
@@ -346,7 +375,9 @@ impl ChainState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qcoin_crypto::{PublicKey, Signature, SignatureSchemeId};
+    use qcoin_crypto::{
+        default_registry, PqSchemeRegistry, PrivateKey, PublicKey, Signature, SignatureSchemeId,
+    };
     use qcoin_script::{DeterministicScriptEngine, OpCode, Script};
     use qcoin_types::{
         create_asset_transaction, derive_asset_id, AssetId, AssetKind, Block, BlockHeader,
@@ -367,6 +398,16 @@ mod tests {
         bincode::serialize(&InputWitness {
             script: script.clone(),
             metadata,
+            unlock: Vec::new(),
+        })
+        .expect("witness serialization should succeed")
+    }
+
+    fn build_unlocking_witness(script: &Script, unlock: Vec<Vec<u8>>) -> Vec<u8> {
+        bincode::serialize(&InputWitness {
+            script: script.clone(),
+            metadata: None,
+            unlock,
         })
         .expect("witness serialization should succeed")
     }
@@ -1002,5 +1043,148 @@ mod tests {
         assert!(!chain.ledger.utxos.contains_key(&utxo_key));
         let new_utxo = UtxoKey { tx_id, index: 0 };
         assert!(chain.ledger.utxos.contains_key(&new_utxo));
+    }
+
+    fn single_key_lock() -> (Script, PrivateKey) {
+        let registry = default_registry();
+        let scheme = registry
+            .get(&SignatureSchemeId::Dilithium2)
+            .expect("scheme should exist");
+        let (pk, sk) = scheme.keygen().expect("keygen should work");
+        let script = Script(vec![
+            OpCode::PushBytes(pk.to_bytes().expect("pk to bytes")),
+            OpCode::CheckSig,
+        ]);
+        (script, sk)
+    }
+
+    fn sign_input(tx: &Transaction, prev: &Output, sk: &PrivateKey) -> Vec<u8> {
+        let registry = default_registry();
+        let scheme = registry
+            .get(&SignatureSchemeId::Dilithium2)
+            .expect("scheme should exist");
+        let sighash = tx.sighash(
+            0,
+            prev,
+            prev.owner_script_hash,
+            TEST_CHAIN_ID,
+            qcoin_types::SighashFlags::default(),
+        );
+        scheme
+            .sign(sk, &sighash)
+            .expect("signing should work")
+            .to_bytes()
+            .expect("sig to bytes")
+    }
+
+    fn key_locked_spend(lock: &Script) -> (LedgerState, UtxoKey, Output, Transaction) {
+        let prev = Output {
+            owner_script_hash: script_hash(lock),
+            assets: vec![AssetAmount {
+                asset_id: simple_asset_id(),
+                amount: 100,
+            }],
+            metadata_hash: None,
+        };
+        let key = UtxoKey {
+            tx_id: [21u8; 32],
+            index: 0,
+        };
+        let mut ledger = LedgerState::default();
+        ledger.utxos.insert(key.clone(), tracked(prev.clone()));
+        let tx = Transaction {
+            core: TransactionCore {
+                kind: TransactionKind::Transfer,
+                inputs: vec![TransactionInput {
+                    tx_id: key.tx_id,
+                    index: key.index,
+                }],
+                outputs: vec![simple_output()],
+            },
+            witness: TransactionWitness::default(),
+        };
+        (ledger, key, prev, tx)
+    }
+
+    #[test]
+    fn key_locked_output_is_spent_with_signature_as_unlocking_data() {
+        let (lock, sk) = single_key_lock();
+        let (mut ledger, key, prev, mut tx) = key_locked_spend(&lock);
+
+        let signature = sign_input(&tx, &prev, &sk);
+        tx.witness.inputs = vec![build_unlocking_witness(&lock, vec![signature])];
+
+        let engine = DeterministicScriptEngine::default();
+        ledger
+            .apply_transaction(&tx, &engine, 1, TEST_CHAIN_ID)
+            .expect("the key holder should be able to spend");
+        assert!(!ledger.utxos.contains_key(&key));
+    }
+
+    #[test]
+    fn key_locked_output_rejects_missing_or_foreign_signatures() {
+        let (_, other_sk) = single_key_lock();
+        let (lock, sk) = single_key_lock();
+        let (mut ledger, key, prev, mut tx) = key_locked_spend(&lock);
+        let engine = DeterministicScriptEngine::default();
+
+        tx.witness.inputs = vec![build_unlocking_witness(&lock, vec![])];
+        assert!(matches!(
+            ledger.apply_transaction(&tx, &engine, 1, TEST_CHAIN_ID),
+            Err(LedgerError::ScriptFailed)
+        ));
+
+        let foreign = sign_input(&tx, &prev, &other_sk);
+        tx.witness.inputs = vec![build_unlocking_witness(&lock, vec![foreign])];
+        assert!(matches!(
+            ledger.apply_transaction(&tx, &engine, 1, TEST_CHAIN_ID),
+            Err(LedgerError::ScriptFailed)
+        ));
+
+        // A signature for this spend does not authorize a different one.
+        let signature = sign_input(&tx, &prev, &sk);
+        tx.core.outputs[0].owner_script_hash = [99u8; 32];
+        tx.witness.inputs = vec![build_unlocking_witness(&lock, vec![signature.clone()])];
+        assert!(matches!(
+            ledger.apply_transaction(&tx, &engine, 1, TEST_CHAIN_ID),
+            Err(LedgerError::ScriptFailed)
+        ));
+
+        // The signature belongs in the unlocking data, not the hashed script.
+        let mut signed_script = lock.clone();
+        signed_script.0.insert(0, OpCode::PushBytes(signature));
+        tx.witness.inputs = vec![build_unlocking_witness(&signed_script, vec![])];
+        assert!(matches!(
+            ledger.apply_transaction(&tx, &engine, 1, TEST_CHAIN_ID),
+            Err(LedgerError::ScriptHashMismatch)
+        ));
+        assert!(ledger.utxos.contains_key(&key));
+    }
+
+    #[test]
+    fn legacy_witness_without_unlocking_data_still_decodes() {
+        // The witness of the one spend on agnes's April chain (~/.qcoin):
+        // `[Nop]`, no metadata, written before unlocking data existed.
+        let legacy = hex_bytes("01000000000000000600000000");
+        let witness = InputWitness::decode(&legacy).expect("legacy witness should decode");
+        assert_eq!(witness.script, simple_script());
+        assert!(witness.metadata.is_none());
+        assert!(witness.unlock.is_empty());
+
+        let current = build_unlocking_witness(&simple_script(), vec![vec![7u8; 3]]);
+        let witness = InputWitness::decode(&current).expect("current witness should decode");
+        assert_eq!(witness.unlock, vec![vec![7u8; 3]]);
+
+        assert!(matches!(
+            InputWitness::decode(&[0xff; 4]),
+            Err(LedgerError::InvalidWitness)
+        ));
+    }
+
+    fn hex_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex digit"))
+            .collect()
     }
 }
