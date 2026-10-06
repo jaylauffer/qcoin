@@ -27,7 +27,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  LOADNGO_REV: 0c0119f97a667a17741d66b0b4c21c33a7fcca06
+  LOADNGO_REV: 6bae953a4bc8d0895f9aa155c6f7e7ec1a0dba13
 
 jobs:
   check:

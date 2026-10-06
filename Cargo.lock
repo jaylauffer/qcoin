@@ -480,7 +480,6 @@ dependencies = [
  "libc",
  "loadngo-anchor",
  "loadngo-proactor",
- "qcoin-types",
  "serde",
  "serde_json",
  "socket2",
