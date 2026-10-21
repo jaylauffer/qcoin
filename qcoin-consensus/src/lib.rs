@@ -439,7 +439,7 @@ mod tests {
             &default_registry(),
             &chain,
             &block,
-            &[alternate_engine.public_key.clone()],
+            std::slice::from_ref(&alternate_engine.public_key),
         );
         assert!(matches!(result, Err(ConsensusError::InvalidBlock)));
     }
